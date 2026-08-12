@@ -65,6 +65,34 @@ def check(path: str) -> list[str]:
                 problems.append(f'{tag}: wall {wall["block"]} clashes with a block')
             seen[wall['block']] = f'{tag} wall'
 
+        # a space may be drawn once and only once, or a click would be ambiguous
+        placed: dict[str, str] = {}
+        for strip in page.get('wallStrips', []):
+            where = f'{tag} {strip["hall"]}{strip["block"]}'
+            count = abs(strip['to'] - strip['from']) + 1
+            step = 1 if strip['to'] >= strip['from'] else -1
+            length = strip['h'] if strip.get('axis') == 'y' else strip['w']
+
+            if strip['block'] not in {w['block'] for w in page.get('walls', [])}:
+                problems.append(f'{where}: strip on a block this page has no wall for')
+            if not (strip.get('axis') in ('x', 'y')) ^ ('a' in strip):
+                problems.append(f'{where}: strip needs exactly one of axis and a')
+            if strip['w'] <= 0 or strip['h'] <= 0:
+                problems.append(f'{where}: strip {strip["from"]} has no area')
+            if not 4 <= length / count <= 15:
+                problems.append(f'{where}: strip {strip["from"]}-{strip["to"]} '
+                                f'has {length / count:.1f}pt cells')
+            for x, y in ((strip['x'], strip['y']),
+                         (strip['x'] + strip['w'], strip['y'] + strip['h'])):
+                if not (-1 <= x <= page['width'] + 1
+                        and -1 <= y <= page['height'] + 1):
+                    problems.append(f'{where}: strip {strip["from"]} outside the page')
+            for i in range(count):
+                key = f'{strip["block"]}-{strip["from"] + step * i}'
+                if key in placed:
+                    problems.append(f'{where}: {key} also drawn by {placed[key]}')
+                placed[key] = f'strip {strip["from"]}-{strip["to"]}'
+
         for i, shape in enumerate(page.get('structures', [])):
             if shape['w'] <= 0 or shape['h'] <= 0:
                 problems.append(f'{tag}: structure {i} has no area')
@@ -83,7 +111,10 @@ if __name__ == '__main__':
     doc = json.load(open(path, encoding='utf-8'))
     blocks = sum(len(p['blocks']) for p in doc['pages'])
     spaces = sum(b['count'] for p in doc['pages'] for b in p['blocks'])
-    print(f'{path}: {len(doc["pages"])} pages, {blocks} blocks, {spaces} spaces')
+    walls = sum(abs(s['to'] - s['from']) + 1
+                for p in doc['pages'] for s in p.get('wallStrips', []))
+    print(f'{path}: {len(doc["pages"])} pages, {blocks} blocks, {spaces} spaces, '
+          f'{walls} wall spaces')
     for issue in issues:
         print(f'  FAIL {issue}')
     if issues:

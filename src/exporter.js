@@ -13,7 +13,7 @@
  */
 
 import { colorOf } from './layout.js';
-import { cellRect, hallPanel, wallCellRect } from './mapdraw.js';
+import { cellRect, hallPanel, stripCellRect } from './mapdraw.js';
 import { splitRuns } from './pens.js';
 
 const A4 = { w: 595.28, h: 841.89 };
@@ -71,12 +71,8 @@ const romanise = hall => hall.replace(/[東西南]/g, m => ROMAJI[m] + ' ').trim
 /** Where a resolved code sits on its page, in map points. */
 export function markerRect(layout, r) {
   if (!r.ok) return null;
-  if (r.wall) {
-    const panel = hallPanel(layout, r.page, r.hall);
-    return panel ? wallCellRect(panel, r.run, r.number) : null;
-  }
-  const block = layout.blocks.get(r.block);
-  return cellRect(block, r.number);
+  if (r.wall) return stripCellRect(r.strip, r.number);
+  return cellRect(layout.blocks.get(r.block), r.number);
 }
 
 /** Markers for one day, numbered in walking order. */
@@ -102,7 +98,6 @@ export function planMarkers(layout, entries) {
     block: m.r.block,
     number: m.r.number,
     placed: m.r.ok,
-    approx: Boolean(m.r.approx),
     rect: markerRect(layout, m.r),
     code: m.r.ok ? m.r.canonical : `${m.r.hall}${m.r.block}-${m.r.number}${m.r.sub}`,
   }));
@@ -121,7 +116,8 @@ function sortKey(layout, m) {
 
 export async function buildPdf({ mapBytes, layout, store, days, options }) {
   const { lib, fontkit } = await loadLibs();
-  const { PDFDocument, StandardFonts, rgb, PDFArray, PDFRef, PDFName } = lib;
+  const { PDFDocument, StandardFonts, rgb, degrees,
+          PDFArray, PDFRef, PDFName } = lib;
   const source = await PDFDocument.load(mapBytes);
 
   const jobs = options.splitDays
@@ -176,7 +172,7 @@ export async function buildPdf({ mapBytes, layout, store, days, options }) {
         const page = copied[cursor++];
         out.addPage(page);
         isolateContents(out, page, { PDFArray, PDFRef, PDFName });
-        drawSheet({ layout, page, sheet, fonts, rgb });
+        drawSheet({ layout, page, sheet, fonts, rgb, degrees });
       }
       if (options.checklist) {
         fonts.jp ??= await out.embedFont(await loadJisFont(), { subset: false });
@@ -218,10 +214,10 @@ function isolateContents(out, page, { PDFArray, PDFRef, PDFName }) {
   page.node.set(key, fresh);
 }
 
-function drawSheet({ layout, page, sheet, fonts, rgb }) {
+function drawSheet({ layout, page, sheet, fonts, rgb, degrees }) {
   for (const marker of sheet.markers) {
     if (sheet.hall && marker.hall !== sheet.hall) continue;
-    drawMarker(page, marker, fonts.bold, rgb);
+    drawMarker(page, marker, fonts.bold, rgb, degrees);
   }
 
   const meta = layout.page(sheet.pageIndex);
@@ -256,10 +252,9 @@ function stamp(page, font, rgb, text, left, top) {
 
 /**
  * Highlight one space and put its walking number in the aisle beside it, so the
- * printed space number underneath stays readable.  Wall spaces are drawn dashed
- * because their position along the wall is laid out evenly rather than measured.
+ * printed space number underneath stays readable.
  */
-function drawMarker(page, marker, font, rgb) {
+function drawMarker(page, marker, font, rgb, degrees) {
   const { rect } = marker;
   if (!rect) return;
   const [r, g, b] = colorOf(marker.color).rgb;
@@ -267,13 +262,16 @@ function drawMarker(page, marker, font, rgb) {
 
   page.drawRectangle({
     x: rect.x, y: rect.y, width: rect.w, height: rect.h,
-    color: colour, opacity: marker.approx ? 0.22 : 0.42,
+    color: colour, opacity: 0.42,
     borderColor: colour, borderWidth: 0.9,
-    ...(marker.approx ? { borderDashArray: [1.6, 1.2] } : null),
+    ...(rect.a ? { rotate: degrees(rect.a) } : null),
   });
 
-  const badgeX = rect.x + rect.w + 4.6;
-  const badgeY = rect.y + rect.h / 2;
+  // the badge sits beside the cell, along whichever way the cell is turned
+  const rad = (rect.a || 0) * Math.PI / 180;
+  const out = rect.w + 4.6, up = rect.h / 2;
+  const badgeX = rect.x + out * Math.cos(rad) - up * Math.sin(rad);
+  const badgeY = rect.y + out * Math.sin(rad) + up * Math.cos(rad);
   page.drawCircle({ x: badgeX, y: badgeY, size: 4.4, color: colour,
                     borderColor: rgb(1, 1, 1), borderWidth: 0.7 });
   const label = String(marker.index);

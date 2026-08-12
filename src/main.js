@@ -137,12 +137,12 @@ function updateHint() {
   const r = layout.resolve(value);
   if (r.ok) {
     ui.hint.className = 'hint';
-    ui.hint.textContent = r.approx
-      ? `✓ ${r.hall} 壁 ${r.block}-${r.number}${r.sub}（沿墙位置为近似）`
+    ui.hint.textContent = r.wall
+      ? `✓ ${r.hall} 壁 ${r.block}-${r.number}${r.sub}`
       : `✓ ${r.hall} ${r.block}ブロック ${r.number}${r.sub}`;
   } else if (r.reason === 'wall') {
     ui.hint.className = 'hint';
-    ui.hint.textContent = `${r.hall} — 该号段还没读，会列在清单的「未定位」里`;
+    ui.hint.textContent = `${r.hall} — 地图上没有这一格，会列在清单的「未定位」里`;
   } else if (r.reason === 'number') {
     ui.hint.className = 'hint bad';
     ui.hint.textContent = `${r.block} 区只有 1–${r.max} 号`;

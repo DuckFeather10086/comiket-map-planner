@@ -5,8 +5,11 @@
  * PDF-space rectangle of every table row.  A block with N spaces has N/2 rows:
  * the right-hand column runs 1..N/2 upwards from the bottom row, the left-hand
  * column runs N/2+1..N downwards from the top, so the two cells on one row add
- * up to N+1.
+ * up to N+1.  Wall blocks have no such grid; they come as strips of printed
+ * cells, listed per page.
  */
+
+import { stripCellRect } from './mapdraw.js';
 
 /** Marker colours, also used as the sidebar colour picker. */
 export const PALETTE = [
@@ -44,14 +47,22 @@ export class Layout {
     this.doc = doc;
     /** block letter -> block record (letters are unique across the event) */
     this.blocks = new Map();
-    /** wall blocks: recognised by name, but with no grid to resolve against */
+    /** wall blocks: recognised by name whether or not a strip carries them */
     this.walls = new Map();
+    /** "ア-31" -> the printed strip that space sits in */
+    this.wallStrips = new Map();
     doc.pages.forEach((page, index) => {
       for (const block of page.blocks) {
         this.blocks.set(block.block, { ...block, page: index });
       }
       for (const wall of page.walls || []) {
         this.walls.set(wall.block, { ...wall, page: index });
+      }
+      for (const strip of page.wallStrips || []) {
+        const step = strip.to >= strip.from ? 1 : -1;
+        for (let n = strip.from; n !== strip.to + step; n += step) {
+          this.wallStrips.set(`${strip.block}-${n}`, { ...strip, page: index });
+        }
       }
     });
 
@@ -60,46 +71,14 @@ export class Layout {
     this.halls = [...new Set([...this.blocks.values()].map(b => b.hall))];
   }
 
-  /** The declared wall run holding a space, if one covers it. */
-  wallRun(block, number) {
-    for (const run of this.doc.wallRuns || []) {
-      if (run.block !== block) continue;
-      if (number < run.from || number > run.to) continue;
-      if ((run.missing || []).includes(number)) continue;
-      return run;
-    }
-    return null;
+  /** The printed wall strip holding a space, if the map shows one. */
+  wallStrip(block, number) {
+    return this.wallStrips.get(`${block}-${number}`) || null;
   }
 
   get event() { return this.doc.event; }
   get pages() { return this.doc.pages; }
   page(index) { return this.doc.pages[index]; }
-
-  /**
-   * Bounding box of a hall in PDF points, for the zoom sheets.  The top gets
-   * extra room so the sheet header does not sit on top of the first row of
-   * tables.
-   */
-  hallBox(pageIndex, hall, pad = 14, padTop = 32) {
-    const blocks = this.page(pageIndex).blocks.filter(b => b.hall === hall);
-    if (!blocks.length) return null;
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const b of blocks) {
-      x0 = Math.min(x0, b.x);
-      x1 = Math.max(x1, b.x + b.w);
-      for (const [ry0, ry1] of b.rows) {
-        y0 = Math.min(y0, ry0);
-        y1 = Math.max(y1, ry1);
-      }
-    }
-    const page = this.page(pageIndex);
-    return {
-      left: Math.max(0, x0 - pad),
-      bottom: Math.max(0, y0 - pad),
-      right: Math.min(page.width, x1 + pad),
-      top: Math.min(page.height, y1 + padTop),
-    };
-  }
 
   /**
    * Parse a written placement such as "東ヨ-12a", "ヨ12", "西1 あ-05b".
@@ -149,14 +128,14 @@ export class Layout {
 
     const wall = this.walls.get(parsed.block);
     if (wall) {
-      // wall spaces are placed only where a run has been read off the printed
-      // map; anything outside those ranges is reported, never guessed at
-      const run = this.wallRun(parsed.block, parsed.number);
-      if (run) {
+      // wall spaces are placed only where the printed map draws a cell for
+      // them; anything else is reported, never guessed at
+      const strip = this.wallStrip(parsed.block, parsed.number);
+      if (strip) {
         return {
-          ok: true, wall: true, run, approx: true, ...parsed,
-          hall: run.hall, page: run.page,
-          canonical: `${run.hall}${parsed.block}-`
+          ok: true, wall: true, strip, ...parsed,
+          hall: strip.hall, page: strip.page,
+          canonical: `${strip.hall}${parsed.block}-`
                      + `${String(parsed.number).padStart(2, '0')}${parsed.sub}`,
         };
       }
@@ -178,13 +157,5 @@ export class Layout {
       rect,
       canonical: `${block.hall}${parsed.block}-${String(parsed.number).padStart(2, '0')}${parsed.sub}`,
     };
-  }
-
-  /** Sort key giving a sensible walking order: hall, then block, then number. */
-  orderKey(entry) {
-    const r = entry.resolved;
-    if (!r?.ok) return [9, 9, 999, ''];
-    const page = this.page(r.page);
-    return [r.page, page.halls.indexOf(r.hall), r.rect.block.x, r.number];
   }
 }

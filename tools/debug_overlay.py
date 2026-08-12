@@ -9,6 +9,7 @@ numbers underneath.
 """
 import glob
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,25 @@ def space_cell(block, number):
     return x0, y0, x0 + w / 2, y1
 
 
+def wall_cells(strip):
+    """Yield (number, corners) for every space in a printed wall strip."""
+    count = abs(strip['to'] - strip['from']) + 1
+    step = 1 if strip['to'] >= strip['from'] else -1
+    angle = math.radians(strip.get('a', 0 if strip.get('axis') == 'x' else 90))
+    ux, uy = math.cos(angle), math.sin(angle)
+    length = strip['w'] if strip.get('axis') == 'x' or 'a' in strip else strip['h']
+    depth = strip['h'] if strip.get('axis') == 'x' or 'a' in strip else strip['w']
+    # a plain rectangle is anchored bottom-left, a turned one at its first cell
+    ox = strip['x'] + (strip['w'] if strip.get('axis') == 'y' else 0)
+    oy = strip['y']
+
+    for i in range(count):
+        s0, s1 = length * i / count, length * (i + 1) / count
+        corners = [(ox + s * ux - t * uy, oy + s * uy + t * ux)
+                   for s, t in ((s0, 0), (s1, 0), (s1, depth), (s0, depth))]
+        yield strip['from'] + step * i, corners
+
+
 def main(layout_path, pdf, page_no, out_png):
     doc = json.load(open(layout_path, encoding='utf-8'))
     page = doc['pages'][page_no - 1]
@@ -76,6 +96,14 @@ def main(layout_path, pdf, page_no, out_png):
         top = (H - block['rows'][-1][1]) * PX
         draw.text((x, top - 30), f"{block['block']}({block['count']})",
                   font=big, fill=(200, 0, 160, 255))
+
+    for strip in page.get('wallStrips', []):
+        for number, corners in wall_cells(strip):
+            points = [(x * PX, (H - y) * PX) for x, y in corners]
+            draw.polygon(points, outline=(0, 160, 0, 220))
+            draw.text((min(p[0] for p in points) + 1,
+                       min(p[1] for p in points) + 1), str(number),
+                      font=font, fill=(220, 0, 0, 255))
 
     img.save(out_png)
     print('wrote', out_png, img.size)

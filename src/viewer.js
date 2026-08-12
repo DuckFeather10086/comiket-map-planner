@@ -8,7 +8,7 @@
 
 import * as pdfjs from '../vendor/pdf.mjs';
 import { colorOf } from './layout.js';
-import { hitTestPage, markKey } from './mapdraw.js';
+import { corners, hitTestPage, markKey } from './mapdraw.js';
 
 pdfjs.GlobalWorkerOptions.workerSrc =
   new URL('../vendor/pdf.worker.mjs', import.meta.url).href;
@@ -88,7 +88,7 @@ export class Viewer extends EventTarget {
     return this.show(this.pageIndex, this.scale * factor);
   }
 
-  /** @param {Array<{rect, index, color, active, approx}>} markers */
+  /** @param {Array<{rect, index, color, active}>} markers */
   drawMarkers(markers) {
     this.markers = markers;
     const canvas = this.markerCanvas;
@@ -99,17 +99,19 @@ export class Viewer extends EventTarget {
     const k = this.dpr;
     for (const marker of markers) {
       const css = colorOf(marker.color).css;
+      const quad = this._quad(marker.rect);
       const box = this._box(marker.rect);
 
+      ctx.beginPath();
+      quad.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.closePath();
       ctx.fillStyle = css;
-      ctx.globalAlpha = marker.active ? 0.55 : (marker.approx ? 0.22 : 0.38);
-      ctx.fillRect(box.x, box.y, box.w, box.h);
+      ctx.globalAlpha = marker.active ? 0.55 : 0.38;
+      ctx.fill();
       ctx.globalAlpha = 1;
       ctx.strokeStyle = css;
       ctx.lineWidth = (marker.active ? 2.6 : 1.6) * k;
-      if (marker.approx) ctx.setLineDash([3 * k, 2 * k]);
-      ctx.strokeRect(box.x, box.y, box.w, box.h);
-      ctx.setLineDash([]);
+      ctx.stroke();
 
       const r = (marker.active ? 11 : 9) * k;
       const bx = box.x + box.w + r * 0.6;
@@ -143,10 +145,18 @@ export class Viewer extends EventTarget {
     });
   }
 
+  /** The cell outline in canvas space; the wall in East 7 runs at an angle. */
+  _quad(rect) {
+    return corners(rect).map(([x, y]) =>
+      this.viewport.convertToViewportPoint(x, y));
+  }
+
   _box(rect) {
-    const [x0, y1] = this.viewport.convertToViewportPoint(rect.x, rect.y + rect.h);
-    const [x1, y0] = this.viewport.convertToViewportPoint(rect.x + rect.w, rect.y);
-    return { x: x0, y: y1, w: x1 - x0, h: y0 - y1 };
+    const quad = this._quad(rect);
+    const xs = quad.map(p => p[0]), ys = quad.map(p => p[1]);
+    return { x: Math.min(...xs), y: Math.min(...ys),
+             w: Math.max(...xs) - Math.min(...xs),
+             h: Math.max(...ys) - Math.min(...ys) };
   }
 
   _source(ev) {
