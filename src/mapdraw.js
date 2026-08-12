@@ -56,7 +56,9 @@ export function hallPanel(layout, pageIndex, hall) {
       structures.push({ x: cx0, y: cy0, w: cx1 - cx0, h: cy1 - cy0, tone: s.tone });
     }
   }
-  return { hall, pageIndex, blocks, structures, box, header: HEADER };
+  const runs = (layout.doc.wallRuns || [])
+    .filter(r => r.page === pageIndex && r.hall === hall);
+  return { hall, pageIndex, blocks, structures, box, runs, header: HEADER };
 }
 
 /** Every hall on the event, in map order. */
@@ -89,6 +91,44 @@ export function sections(block) {
   return runs;
 }
 
+const WALL_T = 8;        // how deep a wall cell reaches into the hall
+const WALL_GAP = 2;      // clearance between the wall strip and the hall edge
+
+/** The spaces a wall run actually has, skipping numbers that are not sold. */
+export function runNumbers(run) {
+  const skip = new Set(run.missing || []);
+  const out = [];
+  for (let n = run.from; n <= run.to; n++) if (!skip.has(n)) out.push(n);
+  return out;
+}
+
+/**
+ * Rectangle of one wall space, laid out along the hall edge it belongs to.
+ *
+ * The printed strips wrap corners at an uneven pitch and are broken up by
+ * pillars, none of which a line-drawn hall reproduces; what has to be right is
+ * the wall, the order and the number, so the run is spread evenly along its
+ * edge.  Position along the wall is therefore approximate by a cell or two.
+ */
+export function wallCellRect(panel, run, number) {
+  const nums = runNumbers(run);
+  const i = nums.indexOf(number);
+  if (i < 0) return null;
+  const { box } = panel;
+  const vertical = run.side === 'left' || run.side === 'right';
+  const span = (vertical ? box.h : box.w) - WALL_GAP * 2;
+  const step = span / nums.length;
+  const k = run.reverse ? nums.length - 1 - i : i;
+  const along = (vertical ? box.y : box.x) + WALL_GAP + k * step;
+
+  if (vertical) {
+    const x = run.side === 'left' ? box.x + WALL_GAP : box.x + box.w - WALL_GAP - WALL_T;
+    return { x, y: along, w: WALL_T, h: step };
+  }
+  const y = run.side === 'top' ? box.y + box.h - WALL_GAP - WALL_T : box.y + WALL_GAP;
+  return { x: along, y, w: step, h: WALL_T };
+}
+
 /** Rectangle of one space, in source PDF coordinates. */
 export function cellRect(block, number) {
   const half = block.count / 2;
@@ -109,6 +149,14 @@ export function cellRect(block, number) {
 
 /** Which space a point lands on, or null. Used for click-to-mark. */
 export function hitTest(panel, px, py) {
+  for (const run of panel.runs || []) {
+    for (const n of runNumbers(run)) {
+      const r = wallCellRect(panel, run, n);
+      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
+        return { block: run.block, hall: run.hall, number: n, wall: true };
+      }
+    }
+  }
   for (const block of panel.blocks) {
     if (px < block.x - 1 || px > block.x + block.w + 1) continue;
     for (let n = 1; n <= block.count; n++) {
@@ -183,6 +231,31 @@ export function drawPanel(pen, panel, marks = new Map(), options = {}) {
     }
   }
 
+  for (const run of panel.runs || []) {
+    for (const n of runNumbers(run)) {
+      const r = wallCellRect(panel, run, n);
+      const mark = marks.get(`${run.block}-${n}`);
+      pen.rect(r.x, r.y, r.w, r.h, {
+        fill: mark ? colorOf(mark.color).rgb : THEME.island,
+        stroke: THEME.islandEdge, lineWidth: 0.4,
+      });
+      if (showNumbers) {
+        pen.text(String(n), r.x + r.w / 2, r.y + r.h / 2, {
+          size: Math.min(r.h * 0.6, r.w * 0.6, 6),
+          align: 'center', middle: true,
+          color: mark ? THEME.paper : THEME.number, weight: mark ? 700 : 400,
+        });
+      }
+    }
+    const mid = runNumbers(run)[Math.floor(runNumbers(run).length / 2)];
+    const r = wallCellRect(panel, run, mid);
+    const vertical = run.side === 'left' || run.side === 'right';
+    pen.text(run.block, vertical ? r.x + r.w + 5 : r.x + r.w / 2,
+             vertical ? r.y + r.h / 2 : r.y + (run.side === 'top' ? -6 : r.h + 3), {
+      size: 8, align: 'center', middle: vertical, color: THEME.letter, weight: 700,
+    });
+  }
+
   // marker badges last so they sit above the grid
   for (const block of panel.blocks) {
     for (let n = 1; n <= block.count; n++) {
@@ -192,6 +265,25 @@ export function drawPanel(pen, panel, marks = new Map(), options = {}) {
       const rightHalf = r.x > block.x + block.w / 4;
       const bx = (rightHalf ? r.x + r.w : r.x) + (rightHalf ? 1 : -1) * 4.4;
       const by = r.y + r.h / 2;
+      pen.circle(bx, by, 4.2, { fill: colorOf(mark.color).rgb, stroke: THEME.paper,
+                                lineWidth: 0.7 });
+      pen.text(String(mark.index), bx, by, {
+        size: String(mark.index).length > 2 ? 4.2 : 5.2,
+        align: 'center', middle: true, color: THEME.paper, weight: 700,
+      });
+    }
+  }
+
+  for (const run of panel.runs || []) {
+    for (const n of runNumbers(run)) {
+      const mark = marks.get(`${run.block}-${n}`);
+      if (!mark) continue;
+      const r = wallCellRect(panel, run, n);
+      const vertical = run.side === 'left' || run.side === 'right';
+      const bx = vertical ? (run.side === 'left' ? r.x + r.w + 4.6 : r.x - 4.6)
+                          : r.x + r.w / 2;
+      const by = vertical ? r.y + r.h / 2
+                          : (run.side === 'top' ? r.y - 4.6 : r.y + r.h + 4.6);
       pen.circle(bx, by, 4.2, { fill: colorOf(mark.color).rgb, stroke: THEME.paper,
                                 lineWidth: 0.7 });
       pen.text(String(mark.index), bx, by, {

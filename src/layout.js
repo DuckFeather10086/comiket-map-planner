@@ -60,6 +60,17 @@ export class Layout {
     this.halls = [...new Set([...this.blocks.values()].map(b => b.hall))];
   }
 
+  /** The declared wall run holding a space, if one covers it. */
+  wallRun(block, number) {
+    for (const run of this.doc.wallRuns || []) {
+      if (run.block !== block) continue;
+      if (number < run.from || number > run.to) continue;
+      if ((run.missing || []).includes(number)) continue;
+      return run;
+    }
+    return null;
+  }
+
   get event() { return this.doc.event; }
   get pages() { return this.doc.pages; }
   page(index) { return this.doc.pages[index]; }
@@ -138,6 +149,17 @@ export class Layout {
 
     const wall = this.walls.get(parsed.block);
     if (wall) {
+      // wall spaces are placed only where a run has been read off the printed
+      // map; anything outside those ranges is reported, never guessed at
+      const run = this.wallRun(parsed.block, parsed.number);
+      if (run) {
+        return {
+          ok: true, wall: true, run, ...parsed,
+          hall: run.hall, page: run.page,
+          canonical: `${run.hall}${parsed.block}-`
+                     + `${String(parsed.number).padStart(2, '0')}${parsed.sub}`,
+        };
+      }
       return { ok: false, reason: 'wall', ...parsed, hall: wall.hall, page: wall.page };
     }
 

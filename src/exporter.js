@@ -76,9 +76,13 @@ export function planMarkers(layout, entries) {
 }
 
 function sortKey(layout, m) {
-  const page = layout.page(m.r.page ?? 9);
   if (!m.r.ok) return [m.r.page ?? 9, 99, 9e9, m.r.number ?? 9e9];
-  return [m.r.page, page.halls.indexOf(m.r.hall), m.r.rect.block.x, m.r.number];
+  const page = layout.page(m.r.page);
+  const hall = page.halls.indexOf(m.r.hall);
+  // walls first within a hall: that is the queue you join before working the
+  // islands, and it keeps the numbering in walking order
+  if (m.r.wall) return [m.r.page, hall, -1, m.r.number];
+  return [m.r.page, hall, m.r.rect.block.x, m.r.number];
 }
 
 /** Group a day's markers by the panel they belong to. */
