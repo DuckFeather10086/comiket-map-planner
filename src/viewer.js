@@ -1,6 +1,6 @@
 /** On-screen map: one hall panel drawn on a canvas, with clickable spaces. */
 
-import { allPanels, drawPanel, hitTest, markKey } from './mapdraw.js';
+import { allPanels, commonScale, drawPanel, hitTest, markKey, panelBox } from './mapdraw.js';
 import { CanvasPen, fit } from './pens.js';
 
 const MIN_ZOOM = 0.4;
@@ -61,8 +61,7 @@ export class Viewer extends EventTarget {
 
   /** The source box including room for the panel title. */
   drawBox() {
-    const { box, header } = this.panel;
-    return { x: box.x, y: box.y, w: box.w, h: box.h + header };
+    return panelBox(this.panel);
   }
 
   render() {
@@ -70,8 +69,9 @@ export class Viewer extends EventTarget {
     if (!panel) return;
     const box = this.drawBox();
 
+    // one scale for every hall so their sizes stay comparable on screen
     const avail = Math.max(320, this.wrap.clientWidth - 40);
-    const base = avail / box.w;
+    const base = commonScale(this.panels, { w: avail, h: avail * 1.15 });
     const s = base * this.zoom;
     const cssW = Math.round(box.w * s);
     const cssH = Math.round(box.h * s);
@@ -88,7 +88,7 @@ export class Viewer extends EventTarget {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    this.transform = fit(box, { x: 0, y: 0, w: cssW, h: cssH });
+    this.transform = fit(box, { x: 0, y: 0, w: cssW, h: cssH }, s);
     this.dpr = dpr;
     const pen = new CanvasPen(ctx, this.transform, dpr);
     drawPanel(pen, panel, this.marks, { notes: this.notes });

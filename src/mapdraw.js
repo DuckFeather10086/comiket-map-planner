@@ -14,7 +14,8 @@ import { colorOf } from './layout.js';
 export const THEME = {
   paper: [1, 1, 1],
   frame: [0.78, 0.81, 0.85],
-  wall: [0.35, 0.39, 0.45],
+  wall: [0.28, 0.32, 0.38],
+  opening: [0.80, 0.84, 0.88],
   islandEdge: [0.62, 0.66, 0.72],
   cellEdge: [0.80, 0.83, 0.87],
   number: [0.25, 0.30, 0.36],
@@ -47,7 +48,32 @@ export function hallPanel(layout, pageIndex, hall) {
                 w: x1 - x0 + PAD * 2, h: y1 - y0 + PAD * 2 };
   const runs = (layout.doc.wallRuns || [])
     .filter(r => r.page === pageIndex && r.hall === hall);
-  return { hall, pageIndex, blocks, box, runs, header: HEADER };
+  const wallLines = (layout.page(pageIndex).wallLines || {})[hall] || [];
+  return { hall, pageIndex, blocks, box, runs, wallLines, header: HEADER };
+}
+
+/**
+ * The drawing box of a panel, including the strip above it for the title.
+ * Sizes are real map points, so panels stay comparable with one another.
+ */
+export function panelBox(panel) {
+  const { box, header } = panel;
+  return { x: box.x, y: box.y, w: box.w, h: box.h + header };
+}
+
+/**
+ * The largest panel on the event.  Everything is drawn at the scale that makes
+ * this one fit, so a small hall comes out small instead of being blown up to
+ * fill its sheet - the halls are not the same size and the map should not
+ * pretend they are.
+ */
+export function commonScale(panels, target) {
+  let s = Infinity;
+  for (const panel of panels) {
+    const box = panelBox(panel);
+    s = Math.min(s, target.w / box.w, target.h / box.h);
+  }
+  return s;
 }
 
 /** Every hall on the event, in map order. */
@@ -175,8 +201,7 @@ export function drawPanel(pen, panel, marks = new Map(), options = {}) {
 
   pen.rect(box.x, box.y, box.w, box.h, { fill: THEME.paper });
 
-  // the hall itself is just its outline: a line drawing, no filled shapes
-  pen.rect(box.x, box.y, box.w, box.h, { stroke: THEME.wall, lineWidth: 1.4 });
+  drawWalls(pen, box, panel.wallLines);
 
   for (const block of panel.blocks) {
     for (const run of sections(block)) {
@@ -299,6 +324,29 @@ export function drawPanel(pen, panel, marks = new Map(), options = {}) {
  * walls with no regular grid to extract, and codes we could not read.  They are
  * listed on the sheet rather than pinned at a guessed position.
  */
+const WALL_W = 2.2;      // drawn thickness of a hall wall
+
+/**
+ * The hall outline, drawn as the wall segments the printed map actually has.
+ * The faint rectangle underneath closes the shape; wherever no segment covers
+ * it, that is a doorway.
+ */
+function drawWalls(pen, box, lines) {
+  pen.rect(box.x, box.y, box.w, box.h,
+           { stroke: THEME.opening, lineWidth: 0.8 });
+  for (const line of lines || []) {
+    const a = Math.min(line.from, line.to);
+    const b = Math.max(line.from, line.to);
+    if (line.side === 'left' || line.side === 'right') {
+      const x = line.side === 'left' ? box.x : box.x + box.w - WALL_W;
+      pen.rect(x, a, WALL_W, b - a, { fill: THEME.wall });
+    } else {
+      const y = line.side === 'top' ? box.y + box.h - WALL_W : box.y;
+      pen.rect(a, y, b - a, WALL_W, { fill: THEME.wall });
+    }
+  }
+}
+
 const NOTE_LIMIT = 3;
 
 function drawNotes(pen, box, notes) {

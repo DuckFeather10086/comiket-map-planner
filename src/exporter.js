@@ -10,7 +10,7 @@
  */
 
 import { colorOf } from './layout.js';
-import { allPanels, drawPanel, markKey } from './mapdraw.js';
+import { allPanels, commonScale, drawPanel, markKey, panelBox } from './mapdraw.js';
 import { PdfPen, fit, splitRuns } from './pens.js';
 
 const A4 = { w: 595.28, h: 841.89 };
@@ -156,8 +156,11 @@ export async function buildPdf({ layout, store, days, options }) {
       const markers = planMarkers(layout, plan.entries);
       const { sheets, orphans } = groupByPanel(layout, markers);
 
+      // every sheet at one scale, so the halls print at their true relative size
+      const scale = commonScale(allPanels(layout),
+        { w: A4.h - MARGIN * 2, h: A4.h - MARGIN * 2 - 14 });
       for (const sheet of sheets) {
-        drawSheet({ doc, rgb, fonts, sheet, day: plan.day, layout });
+        drawSheet({ doc, rgb, fonts, sheet, day: plan.day, scale });
       }
       if (options.checklist) {
         fonts.jp ??= await doc.embedFont(await loadJisFont(), { subset: false });
@@ -175,14 +178,12 @@ export async function buildPdf({ layout, store, days, options }) {
   return outputs;
 }
 
-function drawSheet({ doc, rgb, fonts, sheet, day }) {
+function drawSheet({ doc, rgb, fonts, sheet, day, scale }) {
   const { panel } = sheet;
-  const box = {
-    x: panel.box.x, y: panel.box.y,
-    w: panel.box.w, h: panel.box.h + panel.header,
-  };
-  // portrait or landscape, whichever blows the hall up more
-  const landscape = box.w / box.h >= 1;
+  const box = panelBox(panel);
+  // whichever orientation holds this hall at the shared scale
+  const drawn = { w: box.w * scale, h: box.h * scale };
+  const landscape = drawn.w > A4.w - MARGIN * 2 || drawn.w / drawn.h >= 1;
   const size = landscape ? [A4.h, A4.w] : [A4.w, A4.h];
   const page = doc.addPage(size);
 
@@ -190,7 +191,7 @@ function drawSheet({ doc, rgb, fonts, sheet, day }) {
     x: MARGIN, y: MARGIN,
     w: size[0] - MARGIN * 2, h: size[1] - MARGIN * 2 - 14,
   };
-  const pen = new PdfPen(page, fit(box, target), fonts, rgb);
+  const pen = new PdfPen(page, fit(box, target, scale), fonts, rgb);
 
   const marks = new Map();
   for (const m of sheet.markers) {

@@ -7,9 +7,12 @@
  * from drifting apart.
  */
 
-/** Scale/offset that fits a source box into a target rectangle. */
-export function fit(box, target) {
-  const s = Math.min(target.w / box.w, target.h / box.h);
+/**
+ * Scale/offset that fits a source box into a target rectangle.
+ * Pass `scale` to force a shared scale instead of filling the target.
+ */
+export function fit(box, target, scale) {
+  const s = scale ?? Math.min(target.w / box.w, target.h / box.h);
   return {
     s,
     ox: target.x + (target.w - box.w * s) / 2,

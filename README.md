@@ -8,8 +8,9 @@
 - **点格子就能标**：地图上每个 space 都是可点的。点一下加入清单，再点选中它。
   也可以输入配置代码：`東ヨ-12a` / `ヨ12a` / `西1 あ-05b` / `南t-33a`。
 - **两天分开**：1日目 / 2日目 各自清单，可分别或合并导出。
-- **导出 PDF（全矢量）**：每个有标记的馆一张 A4（横竖自动选更放得开的那个），
-  加一页巡回清单（勾选框、社团名、备注），按巡回顺序编号。
+- **导出 PDF（全矢量）**：每个有标记的馆一张 A4，加一页巡回清单（勾选框、社团名、
+  备注），按巡回顺序编号。**所有馆用同一个比例尺**，所以東3 印出来就是比 東1 大，
+  和实际一样。
 - **颜色分组**：6 色，区分优先级 / 同行的人 / 目标类型。
 - **数据只在本地**：localStorage，不上传任何东西。可导出 JSON / CSV 备份。
 
@@ -56,8 +57,7 @@ python3 -m http.server 8000   # 然后打开 http://localhost:8000
 tools/fetch_map.sh C109 C109Map_all_B4.pdf
 # 按新地图改 tools/extract_layout.py 里的 PAGES（馆的区块字母顺序、band 的 y 范围）
 python3 tools/extract_layout.py maps/C109Map_all_B4.pdf data/C109.json
-# 墙体：改 extract_structure.py 里的 HALL_BAND（每页会场所在的纵向范围）
-python3 tools/extract_structure.py maps/C109Map_all_B4.pdf data/C109.json
+python3 tools/extract_walls.py maps/C109Map_all_B4.pdf data/C109.json
 python3 tools/check_layout.py data/C109.json
 # 目视核对：蓝色的推算编号应当与印刷的手写编号一一对应
 python3 tools/debug_overlay.py data/C109.json maps/C109Map_all_B4.pdf 1 /tmp/ov1.png
@@ -77,10 +77,12 @@ python3 tools/debug_overlay.py data/C109.json maps/C109Map_all_B4.pdf 1 /tmp/ov1
   号段之外的（西1 め 的 1–15 / 58 以后、西2 あ 的其余、南 的 a）还没读，
   这些会照旧列在图角和清单的「未定位」里 —— **不会瞎猜位置**。
   补齐是纯数据录入：往 `wallRuns` 里加 `{block, hall, page, side, from, to}` 即可。
-- **设施没有名字**：墙体、柱子、服务台的形状都画了（形态学开运算从官方图量出，
-  见 `tools/extract_structure.py`），但洗手间 / サークル窓口 / 地区本部 这些
-  文字标签没有 —— 它们在官方图里也是转成曲线的，读不出来。形状能帮你定位，
-  具体是什么要看现场指示牌。
+- **墙画成线段，缺口就是门**（`tools/extract_walls.py`：形态学开运算分离出建筑，
+  再把每条馆边投影成"有墙 / 没墙"的区间）。所以出入口是看得出来的，
+  但**没有标注是哪个门** —— 官方图在馆内也没写，门的名称在会场指示牌上。
+  两个馆相连的那一侧本来就没有墙，图上也就是空的。
+- **设施没有画**：洗手间 / サークル窓口 / 地区本部 的文字标签在官方图里也是
+  转成曲线的，读不出来，所以不画，避免瞎标。
 - 日期文案（`DAY_LABEL`）是 C108 的 2026-08-15/16，换届需要改。
 - 一格 = 一张桌子；`a` / `b` 两个 space 共用一格，标记覆盖整格，具体 a/b 写在清单里。
 
@@ -94,9 +96,9 @@ src/layout.js           配置代码解析 + 坐标解析
 src/viewer.js           屏幕地图、缩放、点选
 src/exporter.js         导出（每馆一张 A4 + 清单页）
 src/store.js            清单状态 / localStorage / 粘贴导入
-data/C108.json          抽取出的坐标 + 墙体形状（103 KB）
+data/C108.json          桌位坐标 + 墙线 + 壁サー号段（58 KB）
 tools/extract_layout.py 从官方 PDF 抽取桌位坐标
-tools/extract_structure.py 抽取墙体 / 柱子 / 服务台的形状
+tools/extract_walls.py  把墙抽成线段（缺口 = 出入口）
 tools/check_layout.py   数据自检（CI 会跑）
 tools/debug_overlay.py  把推算编号叠加到官方图上，用于目视核对
 vendor/pdf-lib.min.js   导出用（懒加载）
