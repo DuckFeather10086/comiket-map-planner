@@ -1,5 +1,7 @@
 /** Wishlist state: plain objects in localStorage, no server, no accounts. */
 
+import { colorOf } from './layout.js';
+
 const VERSION = 1;
 
 const uid = () =>
@@ -83,7 +85,8 @@ export class Store extends EventTarget {
       code: String(e.code || ''),
       name: String(e.name || ''),
       note: String(e.note || ''),
-      color: String(e.color || 'red'),
+      // an import may carry a colour from before the levels, or none at all
+      color: colorOf(e.color).key,
       pin: e.pin && Number.isFinite(e.pin.x) ? e.pin : null,
     })).filter(e => e.code);
     this.save();

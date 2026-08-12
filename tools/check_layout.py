@@ -102,7 +102,65 @@ def check(path: str) -> list[str]:
                     and -1 <= shape['y'] and shape['y'] + shape['h'] <= page['height'] + 1):
                 problems.append(f'{tag}: structure {i} outside the page')
 
+    problems += check_overview(doc)
     return problems
+
+
+def check_overview(doc) -> list[str]:
+    """The site plan the export uses as its cover sheet."""
+    plan = doc.get('overview')
+    if not plan:
+        return ['no overview: the export will have no site plan sheet']
+
+    problems: list[str] = []
+    page = next((p for p in doc['pages'] if p['index'] == plan['page']), None)
+    if not page:
+        return [f'overview: no page with index {plan["page"]}']
+
+    box, free = plan['box'], plan['free']
+    if not (0 <= box['x'] and box['x'] + box['w'] <= page['width']
+            and 0 <= box['y'] and box['y'] + box['h'] <= page['height']):
+        problems.append('overview: crop reaches outside the page')
+    if not inside(free, box):
+        problems.append('overview: the legend corner is outside the crop')
+
+    halls = {h for p in doc['pages'] for h in p['halls']}
+    for room in plan['halls']:
+        where = f'overview {room["hall"]}'
+        if room['hall'] not in halls:
+            problems.append(f'{where}: no such hall at this event')
+        if not inside(room, box):
+            problems.append(f'{where}: room is outside the crop')
+        if overlaps(room, free):
+            problems.append(f'{where}: room sits under the legend corner')
+        if not 8 <= room['w'] <= 60 or not 8 <= room['h'] <= 60:
+            problems.append(f'{where}: implausible room size '
+                            f'{room["w"]}x{room["h"]}')
+        ax, ay = room['at']
+        if not (room['x'] <= ax <= room['x'] + room['w']
+                and room['y'] <= ay <= room['y'] + room['h']):
+            problems.append(f'{where}: badge spot is outside the room')
+        # the badge is drawn about 3pt across, and must not sit on the printed
+        # hall name or over a wall
+        if room['clear'] < 4:
+            problems.append(f'{where}: only {room["clear"]}pt clear at the badge spot')
+
+    missing = halls - {r['hall'] for r in plan['halls']}
+    if missing:
+        problems.append(f'overview: no room measured for {", ".join(sorted(missing))}')
+    return problems
+
+
+def inside(inner, outer) -> bool:
+    return (outer['x'] - 1 <= inner['x']
+            and inner['x'] + inner['w'] <= outer['x'] + outer['w'] + 1
+            and outer['y'] - 1 <= inner['y']
+            and inner['y'] + inner['h'] <= outer['y'] + outer['h'] + 1)
+
+
+def overlaps(a, b) -> bool:
+    return (a['x'] < b['x'] + b['w'] and b['x'] < a['x'] + a['w']
+            and a['y'] < b['y'] + b['h'] and b['y'] < a['y'] + a['h'])
 
 
 if __name__ == '__main__':

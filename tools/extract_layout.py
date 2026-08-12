@@ -577,6 +577,146 @@ def hall_boxes(blocks) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# the site plan in the corner of one sheet
+# --------------------------------------------------------------------------- #
+# One sheet has a small plan of the whole site printed in a corner: the only
+# drawing that shows how the East, West and South buildings sit relative to each
+# other, which is what you actually need to walk between them.  The exporter
+# reuses that artwork as a cover sheet, so what has to come out of here is the
+# crop it lives in and the box of every hall on it, to badge each one with how
+# many circles you have there.
+#
+# Halls in use are drawn as white rooms, so each one is a white region enclosed
+# by the printed outline: find those regions, and match them to the hall names by
+# a point read off the printed plan.
+def components(mask):
+    """Yield (pixel mask, touches the border) for every 4-connected region."""
+    seen = np.zeros(mask.shape, bool)
+    h, w = mask.shape
+    for sy, sx in zip(*np.nonzero(mask)):
+        if seen[sy, sx]:
+            continue
+        stack, pixels, edge = [(sy, sx)], [], False
+        seen[sy, sx] = True
+        while stack:
+            y, x = stack.pop()
+            pixels.append((y, x))
+            edge |= y in (0, h - 1) or x in (0, w - 1)
+            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny, nx]:
+                    seen[ny, nx] = True
+                    stack.append((ny, nx))
+        out = np.zeros(mask.shape, bool)
+        ys, xs = zip(*pixels)
+        out[list(ys), list(xs)] = True
+        yield out, edge
+
+
+def white_regions(grey, page_h, window, minimum=8.0):
+    """Enclosed white regions of a window on a page, as pixel masks.
+
+    Anything touching the window edge is the paper around the drawing, not a
+    room, and is dropped.
+    """
+    x0, y0, x1, y1 = window
+    cx0, cy0 = int(x0 * PX), int((page_h - y1) * PX)
+    cx1, cy1 = int(x1 * PX), int((page_h - y0) * PX)
+    win = grey[cy0:cy1, cx0:cx1]
+    open_ = win >= 205                     # paper, as opposed to ink or a tint
+    out = [mask for mask, edge in components(open_)
+           if not edge and mask.sum() >= (minimum * PX) ** 2]
+    return out, (cx0, cy0)
+
+
+def fill_specks(mask, limit=3.0):
+    """Close the pinholes a region encloses, keeping its larger holes open.
+
+    A hall drawn as in-use-but-elsewhere is tinted with printed dots, which
+    riddle the room with holes a pixel or two across and would otherwise crowd
+    the badge into a corner.  The hall name printed inside it is one large hole,
+    and stays one: a badge should keep off it.
+    """
+    ys, xs = np.nonzero(mask)
+    # a one pixel margin around the region, so its outside is one border-touching
+    # component and only true holes come back
+    box = (slice(ys.min() - 1, ys.max() + 2), slice(xs.min() - 1, xs.max() + 2))
+    filled = mask.copy()
+    for hole, edge in components(~mask[box]):
+        if not edge and hole.sum() <= (limit * PX) ** 2:
+            filled[box] |= hole
+    return filled
+
+
+def clearest_point(mask):
+    """The point of a region furthest from its edge, and that distance in px.
+
+    A hall box has its name printed inside it, so the room is not one open
+    rectangle: peeling the region away one pixel at a time finds whichever
+    corner of it is actually free, which is where a badge can go.
+    """
+    depth = mask.astype(np.int32)
+    cur = mask
+    while cur.any():
+        shrunk = cur.copy()
+        shrunk[1:] &= cur[:-1]
+        shrunk[:-1] &= cur[1:]
+        shrunk[:, 1:] &= cur[:, :-1]
+        shrunk[:, :-1] &= cur[:, 1:]
+        cur = shrunk
+        depth += cur
+    flat = int(depth.argmax())
+    return (flat % mask.shape[1], flat // mask.shape[1]), int(depth.flat[flat])
+
+
+def site_plan(grey, page_h, spec) -> dict:
+    """Measure the printed site plan: its crop, and the box of each hall on it."""
+    regions, (ox, oy) = white_regions(grey, page_h, spec['box'])
+    to_pt = lambda x, y: ((ox + x + 0.5) / PX, page_h - (oy + y + 0.5) / PX)
+
+    boxes = []
+    for mask in regions:
+        ys, xs = np.nonzero(mask)
+        left, top = to_pt(xs.min(), ys.min())
+        right, bottom = to_pt(xs.max(), ys.max())
+        boxes.append((mask, (left, bottom, right, top)))
+
+    halls, claimed = [], {}
+    for name, (px, py) in spec['halls']:
+        hit = [b for b in boxes
+               if b[1][0] <= px <= b[1][2] and b[1][1] <= py <= b[1][3]]
+        if len(hit) != 1:
+            raise RuntimeError(f'site plan: {name} at {(px, py)} matched '
+                               f'{len(hit)} rooms, expected exactly one')
+        mask, (left, bottom, right, top) = hit[0]
+        if id(mask) in claimed:
+            raise RuntimeError(f'site plan: {name} and {claimed[id(mask)]} '
+                               f'matched the same room')
+        claimed[id(mask)] = name
+        (cx, cy), room = clearest_point(fill_specks(mask))
+        at = to_pt(cx, cy)
+        print(f'   plan {name:>3}  x={left:6.1f} y={bottom:6.1f} '
+              f'{right - left:4.1f}x{top - bottom:4.1f}  '
+              f'badge at ({at[0]:6.1f},{at[1]:6.1f}) with {room / PX:4.1f}pt clear')
+        halls.append({'hall': name, 'x': round(left, 2), 'y': round(bottom, 2),
+                      'w': round(right - left, 2), 'h': round(top - bottom, 2),
+                      'at': [round(at[0], 2), round(at[1], 2)],
+                      'clear': round(room / PX, 2)})
+
+    # the legend is written into a corner of the crop, so it had better be empty
+    fx0, fy0, fx1, fy1 = spec['free']
+    free = grey[int((page_h - fy1) * PX):int((page_h - fy0) * PX),
+                int(fx0 * PX):int(fx1 * PX)]
+    if (free < 205).any():
+        raise RuntimeError('site plan: the legend corner is not blank')
+
+    x0, y0, x1, y1 = spec['box']
+    return {'page': spec['page'] - 1,
+            'box': {'x': x0, 'y': y0, 'w': x1 - x0, 'h': y1 - y0},
+            'free': {'x': fx0, 'y': fy0, 'w': fx1 - fx0, 'h': fy1 - fy0},
+            'halls': halls}
+
+
+# --------------------------------------------------------------------------- #
 # per-page metadata, read off the printed map
 # --------------------------------------------------------------------------- #
 # `at` is (origin, angle, length, depth): the corner a run starts from, the
@@ -661,6 +801,20 @@ PAGES = [
     },
 ]
 
+# The site plan printed in the top-right corner of the East 7 sheet: the crop it
+# occupies, the blank corner of that crop the export writes its legend into, and
+# a point inside each hall room as printed.  All read off the sheet by eye; the
+# rooms themselves are measured, and a point that does not land in exactly one
+# room fails the run rather than being taken as near enough.
+OVERVIEW = {
+    'page': 2,
+    'box': (788, 156, 955, 285),
+    'free': (788, 225, 886, 282),
+    'halls': [('東7', (812, 175)), ('東3', (846, 200)), ('東2', (866, 201)),
+              ('東1', (885, 201)), ('西1', (908, 210)), ('西2', (939, 210)),
+              ('南1', (936, 244)), ('南2', (936, 268))],
+}
+
 
 def main(pdf: str, out_path: str) -> None:
     doc = {'event': os.path.basename(pdf).split('Map')[0] or 'map',
@@ -698,6 +852,10 @@ def main(pdf: str, out_path: str) -> None:
             doc['pages'].append({'index': page - 1, 'width': w_pt, 'height': h_pt,
                                  'halls': meta['halls'], 'blocks': blocks,
                                  'walls': walls, 'wallStrips': strips})
+
+            if page == OVERVIEW['page']:
+                print(f'page {page}: site plan')
+                doc['overview'] = site_plan(img, h_pt, OVERVIEW)
 
     with open(out_path, 'w', encoding='utf-8') as fh:
         json.dump(doc, fh, ensure_ascii=False, separators=(',', ':'))

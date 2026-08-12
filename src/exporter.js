@@ -1,20 +1,23 @@
 /**
  * PDF output: the official hall map with the wishlist stamped onto it.
  *
- * Map sheets come out of one copyPages() call so pdf-lib shares a single copy
- * of the artwork between them and keeps its original compressed streams; each
- * sheet then gets its own content array so markers do not bleed across sheets,
- * and a per-hall zoom sheet is the same page again with its boxes cropped.
- * Re-embedding the page per sheet instead would decompress the artwork and
- * inflate the file by about 45%.
+ * One file per day holds the whole map - all four sheets, whether or not you
+ * marked anything on them - behind a cover sheet showing where the halls are.
+ * Sheets come out of one copyPages() call so pdf-lib shares a single copy of the
+ * artwork between them and keeps its original compressed streams; each sheet
+ * then gets its own content array so markers do not bleed across sheets, and
+ * both the per-hall zoom sheets and the cover are the same page again with its
+ * boxes cropped.  Re-embedding a page per sheet instead would decompress the
+ * artwork and inflate the file by about 45%.
  *
  * Markers are vector shapes over the printed cells.  The checklist is set with
  * a JIS X 0208 level-1 face, fetched only when one is actually printed.
  */
 
-import { colorOf } from './layout.js';
+import { colorOf, PALETTE, topColor } from './layout.js';
 import { cellRect, hallPanel, stripCellRect } from './mapdraw.js';
-import { splitRuns } from './pens.js';
+import { clip, measure, write } from './pens.js';
+import { drawSitePlan } from './siteplan.js';
 
 const A4 = { w: 595.28, h: 841.89 };
 
@@ -65,6 +68,7 @@ const DAY_LABEL = {
 
 const ROMAJI = { 東: 'East', 西: 'West', 南: 'South' };
 const romanise = hall => hall.replace(/[東西南]/g, m => ROMAJI[m] + ' ').trim();
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /* ------------------------------------------------------------------ planning */
 
@@ -141,44 +145,31 @@ export async function buildPdf({ mapBytes, layout, store, days, options }) {
       bold: await out.embedFont(StandardFonts.HelveticaBold),
     };
 
-    // sheets planned up front: pdf-lib caches copied objects per copyPages call,
-    // so one call keeps a single copy of the artwork for the whole document
-    const sheets = [];
-    for (const plan of plans) {
-      const byPage = new Map();
-      for (const m of plan.markers) {
-        if (!m.placed) continue;
-        if (!byPage.has(m.page)) byPage.set(m.page, []);
-        byPage.get(m.page).push(m);
-      }
-      for (const pageIndex of [...byPage.keys()].sort((a, b) => a - b)) {
-        const pageMarkers = byPage.get(pageIndex);
-        sheets.push({ plan, pageIndex, markers: pageMarkers, hall: null });
-        if (!options.zoomPages) continue;
-        for (const hall of new Set(pageMarkers.map(m => m.hall))) {
-          const panel = hallPanel(layout, pageIndex, hall);
-          if (panel) sheets.push({ plan, pageIndex, markers: pageMarkers, hall, panel });
-        }
-      }
-    }
+    // every sheet planned up front, in the order it will be bound: the folio
+    // numbers the cover sheet points with have to be known before anything is
+    // drawn, and pdf-lib caches copied objects per copyPages call, so one call
+    // keeps a single copy of the artwork for the whole document
+    const sheets = plans.flatMap(plan => planSheets(layout, plan, options));
+    sheets.forEach((sheet, i) => Object.assign(sheet, { folio: i + 1,
+                                                       total: sheets.length }));
 
-    const copied = sheets.length
-      ? await out.copyPages(source, sheets.map(s => s.pageIndex))
-      : [];
+    const copied = await out.copyPages(
+      source, sheets.filter(s => s.kind !== 'list').map(s => s.pageIndex));
 
     let cursor = 0;
-    for (const plan of plans) {
-      for (const sheet of sheets.filter(s => s.plan === plan)) {
-        const page = copied[cursor++];
-        out.addPage(page);
-        isolateContents(out, page, { PDFArray, PDFRef, PDFName });
-        drawSheet({ layout, page, sheet, fonts, rgb, degrees });
-      }
-      if (options.checklist) {
+    for (const sheet of sheets) {
+      if (sheet.kind === 'list') {
         fonts.jp ??= await out.embedFont(await loadJisFont(), { subset: false });
-        const placed = new Set(plan.markers.map(m => m.entry.id));
-        await addChecklist(out, plan.day, plan.markers,
-                           plan.entries.filter(e => !placed.has(e.id)), fonts, rgb);
+        paintChecklist(out, sheet, fonts, rgb);
+        continue;
+      }
+      const page = copied[cursor++];
+      out.addPage(page);
+      isolateContents(out, page, { PDFArray, PDFRef, PDFName });
+      if (sheet.kind === 'cover') {
+        drawCover({ layout, page, sheet, sheets, fonts, rgb });
+      } else {
+        drawSheet({ layout, page, sheet, fonts, rgb, degrees });
       }
     }
 
@@ -188,6 +179,81 @@ export async function buildPdf({ mapBytes, layout, store, days, options }) {
     });
   }
   return outputs;
+}
+
+/**
+ * One day's sheets, in order: the site plan, then the whole official map - every
+ * sheet of it, so the file is the map and not just the pages you happened to
+ * mark - each followed by a cropped sheet per hall you have stops in, and the
+ * walking list last.
+ */
+function planSheets(layout, plan, options) {
+  const byPage = new Map();
+  for (const m of plan.markers) {
+    if (!m.placed) continue;
+    if (!byPage.has(m.page)) byPage.set(m.page, []);
+    byPage.get(m.page).push(m);
+  }
+
+  const sheets = [];
+  if (options.sitePlan && layout.overview) {
+    sheets.push({ plan, kind: 'cover', pageIndex: layout.overview.page });
+  }
+  layout.pages.forEach((meta, pageIndex) => {
+    const markers = byPage.get(pageIndex) || [];
+    sheets.push({ plan, kind: 'map', pageIndex, markers });
+    if (!options.zoomPages) return;
+    for (const hall of meta.halls) {
+      if (!markers.some(m => m.hall === hall)) continue;
+      const panel = hallPanel(layout, pageIndex, hall);
+      if (panel) sheets.push({ plan, kind: 'zoom', pageIndex, markers, hall, panel });
+    }
+  });
+  if (options.checklist) {
+    const placed = new Set(plan.markers.map(m => m.entry.id));
+    const unplaced = plan.entries.filter(e => !placed.has(e.id));
+    for (const rows of checklistPages(plan.markers, unplaced)) {
+      sheets.push({ plan, kind: 'list', rows });
+    }
+  }
+  return sheets;
+}
+
+/** Which folio a hall's map sheet ended up on, for the cover sheet to point at. */
+function folioOf(sheets, plan, pageIndex) {
+  const sheet = sheets.find(s => s.plan === plan && s.kind === 'map'
+                                 && s.pageIndex === pageIndex);
+  return sheet ? sheet.folio : 1;
+}
+
+function drawCover({ layout, page, sheet, sheets, fonts, rgb }) {
+  const { plan } = sheet;
+  const placed = plan.markers.filter(m => m.placed);
+  const rows = [];
+  for (const [pageIndex, meta] of layout.pages.entries()) {
+    for (const hall of meta.halls) {
+      const here = placed.filter(m => m.hall === hall);
+      if (!here.length) continue;
+      rows.push({
+        hall, name: romanise(hall), count: here.length,
+        color: topColor(here.map(m => m.entry)),
+        folio: folioOf(sheets, plan, pageIndex),
+      });
+    }
+  }
+
+  const lost = plan.entries.length - placed.length;
+  drawSitePlan(page, {
+    overview: layout.overview,
+    rows,
+    totals: PALETTE.map(level =>
+      plan.entries.filter(e => colorOf(e.color) === level).length),
+    title: `DAY ${plan.day} - ${DAY_LABEL[plan.day].date}`,
+    subtitle: `${layout.event} VENUE PLAN - ${plural(plan.entries.length, 'stop')}`
+              + (lost ? ` - ${lost} not on the map, see the list` : ''),
+    folio: `${sheet.folio} / ${sheet.total}`,
+    fonts, rgb,
+  });
 }
 
 /**
@@ -215,39 +281,62 @@ function isolateContents(out, page, { PDFArray, PDFRef, PDFName }) {
 }
 
 function drawSheet({ layout, page, sheet, fonts, rgb, degrees }) {
-  for (const marker of sheet.markers) {
-    if (sheet.hall && marker.hall !== sheet.hall) continue;
-    drawMarker(page, marker, fonts.bold, rgb, degrees);
-  }
+  const mine = sheet.hall
+    ? sheet.markers.filter(m => m.hall === sheet.hall)
+    : sheet.markers;
+  for (const marker of mine) drawMarker(page, marker, fonts.bold, rgb, degrees);
 
   const meta = layout.page(sheet.pageIndex);
+  let left = 0, top = meta.height, width = meta.width;
   if (sheet.hall) {
     const { box } = sheet.panel;
-    const w = box.w, h = box.h + sheet.panel.header;
-    page.setMediaBox(box.x, box.y, w, h);
-    page.setCropBox(box.x, box.y, w, h);
-    page.setBleedBox(box.x, box.y, w, h);
-    page.setTrimBox(box.x, box.y, w, h);
-    stamp(page, fonts.bold, rgb,
-          `DAY ${sheet.plan.day} - ${romanise(sheet.hall)}`, box.x, box.y + h);
-  } else {
-    stamp(page, fonts.bold, rgb,
-          `DAY ${sheet.plan.day} - ${DAY_LABEL[sheet.plan.day].date} - `
-          + meta.halls.map(romanise).join(' / '), 0, meta.height);
+    const h = box.h + sheet.panel.header;
+    for (const set of ['setMediaBox', 'setCropBox', 'setBleedBox', 'setTrimBox']) {
+      page[set](box.x, box.y, box.w, h);
+    }
+    [left, top, width] = [box.x, box.y + h, box.w];
   }
+
+  const where = sheet.hall
+    ? romanise(sheet.hall)
+    : meta.halls.map(romanise).join(' / ');
+  const count = mine.length ? plural(mine.length, 'stop') : 'nothing marked';
+  stamp(page, fonts, rgb, [
+    `DAY ${sheet.plan.day} - ${DAY_LABEL[sheet.plan.day].date}`,
+    where, count, `${sheet.folio} / ${sheet.total}`,
+  ].join('  -  '), left, top, width, mine.length > 0);
 }
 
-function stamp(page, font, rgb, text, left, top) {
+/**
+ * The caption strip: which day and hall a sheet is, and what its colours mean.
+ *
+ * It goes over the printed artwork in an opaque box, at the top left, where the
+ * map has its own hall label - the zoom sheets crop in a header strip for it.
+ * The key is dropped rather than crowded when a narrow sheet has no room.
+ */
+function stamp(page, fonts, rgb, text, left, top, width, key) {
   const size = 9;
-  const width = font.widthOfTextAtSize(text, size);
+  const textW = measure(text, size, fonts, true);
+  const keyW = key ? PALETTE.reduce(
+    (w, level) => w + 13 + measure(`${level.tag} ${level.en}`, 7, fonts, true), 8) : 0;
+  const fits = keyW && textW + keyW + 40 <= width;
   page.drawRectangle({
-    x: left + 12, y: top - 26, width: width + 14, height: 16,
+    x: left + 12, y: top - 26, width: textW + (fits ? keyW : 0) + 14, height: 16,
     color: rgb(1, 1, 1), opacity: 0.9,
     borderColor: rgb(0.25, 0.25, 0.25), borderWidth: 0.6,
   });
-  page.drawText(text, {
-    x: left + 19, y: top - 22, size, font, color: rgb(0.1, 0.1, 0.1),
-  });
+  write(page, text, left + 19, top - 22,
+        { size, fonts, bold: true, color: rgb(0.1, 0.1, 0.1) });
+  if (!fits) return;
+
+  let x = left + 19 + textW + 8;
+  for (const level of PALETTE) {
+    const [r, g, b] = level.rgb;
+    page.drawCircle({ x: x + 3, y: top - 18.4, size: 3, color: rgb(r, g, b) });
+    write(page, `${level.tag} ${level.en}`, x + 8, top - 21,
+          { size: 7, fonts, bold: true, color: rgb(0.2, 0.23, 0.27) });
+    x += 13 + measure(`${level.tag} ${level.en}`, 7, fonts, true);
+  }
 }
 
 /**
@@ -285,10 +374,15 @@ function drawMarker(page, marker, font, rgb, degrees) {
 
 /* ---------------------------------------------------------------- checklist */
 
-const CHECK = { margin: 34, rowH: 22, headH: 36, groupH: 20 };
+const CHECK = { margin: 34, rowH: 22, headH: 48, groupH: 20 };
 
-/** The walking list, set as real text so it can be searched and selected. */
-async function addChecklist(doc, day, markers, unplaced, fonts, rgb) {
+/**
+ * The walking list, grouped by hall and cut into sheets.
+ *
+ * It comes out before anything is drawn so the sheets can be counted with the
+ * rest, which is what lets the cover sheet print folio numbers.
+ */
+function checklistPages(markers, unplaced) {
   const groups = [];
   for (const m of markers) {
     const hall = m.placed ? m.hall : `${m.hall}（地図に印なし）`;
@@ -304,11 +398,7 @@ async function addChecklist(doc, day, markers, unplaced, fonts, rgb) {
                                   color: entry.color })),
     });
   }
-  if (!groups.length) return;
-
-  const sheets = paginate(groups);
-  sheets.forEach((rows, i) =>
-    paintChecklist(doc, rows, day, i + 1, sheets.length, fonts, rgb));
+  return groups.length ? paginate(groups) : [];
 }
 
 function paginate(groups) {
@@ -335,39 +425,10 @@ function paginate(groups) {
   return pages;
 }
 
-/**
- * The Japanese face is a CJK fallback and carries no Latin, so every string is
- * split by script and each run drawn with the font that actually has it.
- */
-function pickFont(run, fonts, bold) {
-  return run.cjk ? fonts.jp : (bold ? fonts.bold : fonts.latin);
-}
-
-function measure(text, size, fonts, bold = false) {
-  return splitRuns(text).reduce(
-    (w, run) => w + pickFont(run, fonts, bold).widthOfTextAtSize(run.text, size), 0);
-}
-
-function write(page, text, x, y, { size, fonts, bold = false, color, align }) {
-  let px = x;
-  if (align === 'right') px -= measure(text, size, fonts, bold);
-  for (const run of splitRuns(text)) {
-    const font = pickFont(run, fonts, bold);
-    page.drawText(run.text, { x: px, y, size, font, color });
-    px += font.widthOfTextAtSize(run.text, size);
-  }
-}
-
-function clip(text, size, fonts, maxWidth) {
-  if (measure(text, size, fonts) <= maxWidth) return text;
-  let out = text;
-  while (out.length > 1 && measure(out + '…', size, fonts) > maxWidth) {
-    out = out.slice(0, -1);
-  }
-  return out + '…';
-}
-
-function paintChecklist(doc, groups, day, pageNo, pageTotal, fonts, rgb) {
+/** One list sheet: a title, the colour key, then hall by hall. */
+function paintChecklist(doc, sheet, fonts, rgb) {
+  const { plan, rows: groups } = sheet;
+  const day = plan.day;
   const page = doc.addPage([A4.w, A4.h]);
   const left = CHECK.margin;
   const right = A4.w - CHECK.margin;
@@ -375,12 +436,22 @@ function paintChecklist(doc, groups, day, pageNo, pageTotal, fonts, rgb) {
 
   write(page, `${DAY_LABEL[day].jp}  ${DAY_LABEL[day].date}  巡回リスト`,
         left, y - 13, { size: 14, fonts, bold: true, color: rgb(0.07, 0.09, 0.12) });
-  write(page, `${pageNo} / ${pageTotal}`, right, y - 12,
+  write(page, `${sheet.folio} / ${sheet.total}`, right, y - 12,
         { size: 9, fonts, align: 'right', color: rgb(0.5, 0.54, 0.58) });
+
+  let keyX = left;
+  for (const level of PALETTE) {
+    const [r, g, b] = level.rgb;
+    page.drawCircle({ x: keyX + 3.5, y: y - 27, size: 3.5, color: rgb(r, g, b) });
+    write(page, `${level.tag} ${level.en}`, keyX + 9.5, y - 29.5,
+          { size: 7.5, fonts, bold: true, color: rgb(0.35, 0.39, 0.44) });
+    keyX += 22 + measure(`${level.tag} ${level.en}`, 7.5, fonts, true);
+  }
   y -= CHECK.headH;
 
   const colCode = left + 26;
   const colName = left + 96;
+  const colTag = right - 52;
   const colCheck = right - 16;
 
   for (const group of groups) {
@@ -391,7 +462,8 @@ function paintChecklist(doc, groups, day, pageNo, pageTotal, fonts, rgb) {
     y -= CHECK.groupH;
 
     for (const row of group.rows) {
-      const [r, g, b] = colorOf(row.color).rgb;
+      const level = colorOf(row.color);
+      const [r, g, b] = level.rgb;
       const colour = rgb(r, g, b);
       const mid = y - 11;
 
@@ -410,7 +482,14 @@ function paintChecklist(doc, groups, day, pageNo, pageTotal, fonts, rgb) {
       write(page, row.code, colCode, mid - 3,
             { size: 9.5, fonts, bold: true, color: rgb(0.07, 0.09, 0.12) });
 
-      const width = colCheck - colName - 22;
+      // the level in words as well as in colour, so a photocopy still reads
+      const [ir, ig, ib] = level.ink;
+      page.drawRectangle({ x: colTag, y: mid - 4.5, width: 16, height: 9,
+                           color: colour, borderColor: colour, borderWidth: 0.5 });
+      write(page, level.tag, colTag + 8, mid - 2.2,
+            { size: 6.5, fonts, bold: true, align: 'center', color: rgb(ir, ig, ib) });
+
+      const width = colTag - colName - 10;
       if (row.entry.name) {
         write(page, clip(row.entry.name, 9, fonts, width),
               colName, mid + (row.entry.note ? 1 : -3),

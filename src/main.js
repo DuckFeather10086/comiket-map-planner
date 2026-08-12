@@ -13,7 +13,8 @@ const ui = {
   dayTabs: $('day-tabs'), hallTabs: $('hall-tabs'),
   list: $('entry-list'), listCount: $('list-count'),
   form: $('add-form'), code: $('in-code'), name: $('in-name'),
-  note: $('in-note'), color: $('in-color'), hint: $('code-hint'),
+  note: $('in-note'), levels: $('in-level'), hint: $('code-hint'),
+  levelHint: $('level-hint'),
   wrap: $('canvas-wrap'), stage: $('stage'), canvas: $('map-canvas'),
   markerCanvas: $('marker-canvas'),
   zoomLevel: $('zoom-level'), status: $('hover-status'),
@@ -32,7 +33,7 @@ async function boot() {
   layout = await Layout.load(LAYOUT_URL);
   store = new Store(layout.event);
   $('event-name').textContent = layout.event;
-  for (const c of PALETTE) ui.color.append(new Option(c.label, c.key));
+  buildLevels();
 
   ui.loaderText.textContent = '加载会场地图…';
   const { bytes, verified } = await loadMap(layout.doc);
@@ -60,6 +61,54 @@ async function boot() {
 }
 
 /* --------------------------------------------------------------------- chrome */
+
+/**
+ * The priority picker: colour is the plan, so this is what a new entry means
+ * rather than what shade it gets.  One radio per level, so it stays keyboard
+ * navigable and the form resets to the level you were using.
+ */
+function buildLevels() {
+  for (const level of PALETTE) {
+    const label = document.createElement('label');
+    label.className = 'level';
+    label.style.setProperty('--c', level.css);
+    label.style.setProperty('--ci', level.inkCss);
+    label.title = level.label;
+
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'level';
+    radio.value = level.key;
+    // defaultChecked, not checked: a form reset has to land back on a level
+    radio.defaultChecked = level === PALETTE[0];
+
+    const tag = document.createElement('b');
+    tag.textContent = level.tag;
+    const text = document.createElement('span');
+    text.textContent = level.short;
+
+    label.append(radio, tag, text);
+    ui.levels.append(label);
+  }
+  ui.levels.addEventListener('change', showLevelHint);
+  showLevelHint();
+}
+
+/** The level a new entry gets: whichever chip is selected. */
+const currentLevel = () =>
+  ui.levels.querySelector('input:checked')?.value ?? PALETTE[0].key;
+
+function setLevel(key) {
+  const wanted = colorOf(key).key;
+  for (const radio of ui.levels.querySelectorAll('input')) {
+    radio.checked = radio.value === wanted;
+  }
+  showLevelHint();
+}
+
+function showLevelHint() {
+  ui.levelHint.textContent = colorOf(currentLevel()).label;
+}
 
 function buildPageTabs() {
   ui.hallTabs.innerHTML = '';
@@ -93,7 +142,7 @@ function wireUi() {
     if (!code) return;
     const patch = {
       code, name: ui.name.value.trim(),
-      note: ui.note.value.trim(), color: ui.color.value,
+      note: ui.note.value.trim(), color: currentLevel(),
     };
     if (editingId) {
       store.update(editingId, patch);
@@ -101,9 +150,8 @@ function wireUi() {
     } else {
       activeId = store.add(patch).id;
     }
-    const colour = patch.color;
     ui.form.reset();
-    ui.color.value = colour;
+    setLevel(patch.color);
     ui.code.focus();
     updateHint();
   });
@@ -215,9 +263,12 @@ function renderRow(entry, marker) {
   li.classList.toggle('active', entry.id === activeId);
   li.classList.toggle('bad', !marker);
 
+  const level = colorOf(entry.color);
   const badge = document.createElement('span');
   badge.className = 'idx';
-  badge.style.background = colorOf(entry.color).css;
+  badge.style.background = level.css;
+  badge.style.color = level.inkCss;
+  badge.title = `${level.tag} ${level.label}`;
   badge.textContent = marker ? marker.index : '?';
 
   const body = document.createElement('div');
@@ -272,6 +323,7 @@ function setEditing(id) {
   if (!id) {
     submit.textContent = '＋';
     ui.form.reset();
+    showLevelHint();
     updateHint();
     return;
   }
@@ -279,7 +331,7 @@ function setEditing(id) {
   ui.code.value = entry.code;
   ui.name.value = entry.name;
   ui.note.value = entry.note;
-  ui.color.value = entry.color;
+  setLevel(entry.color);
   submit.textContent = '✓';
   ui.code.focus();
   updateHint();
@@ -299,7 +351,7 @@ function onCellClick(hit) {
     render();
     return;
   }
-  activeId = store.add({ code, color: ui.color.value }).id;
+  activeId = store.add({ code, color: currentLevel() }).id;
 }
 
 function onHover(hit) {
@@ -315,7 +367,10 @@ function wirePaste() {
   $('btn-paste').addEventListener('click', () => dlg.showModal());
   $('paste-cancel').addEventListener('click', () => dlg.close());
   $('paste-ok').addEventListener('click', () => {
-    const rows = parsePaste($('paste-text').value);
+    // pasted rows come in at whichever level is selected, so a bulk import does
+    // not silently claim everything is a must-go
+    const level = currentLevel();
+    const rows = parsePaste($('paste-text').value).map(row => ({ ...row, color: level }));
     if (rows.length) store.addMany(rows);
     $('paste-text').value = '';
     dlg.close();
@@ -342,6 +397,7 @@ function wireExport() {
       const files = await buildPdf({
         mapBytes, layout, store, days,
         options: {
+          sitePlan: $('opt-plan').checked,
           zoomPages: $('opt-zoom').checked,
           checklist: $('opt-list').checked,
           splitDays: $('opt-split').checked,

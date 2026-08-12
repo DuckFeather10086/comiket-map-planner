@@ -98,7 +98,8 @@ export class Viewer extends EventTarget {
 
     const k = this.dpr;
     for (const marker of markers) {
-      const css = colorOf(marker.color).css;
+      const level = colorOf(marker.color);
+      const css = level.css;
       const quad = this._quad(marker.rect);
       const box = this._box(marker.rect);
 
@@ -124,7 +125,7 @@ export class Viewer extends EventTarget {
       ctx.lineWidth = 1.6 * k;
       ctx.stroke();
 
-      ctx.fillStyle = '#fff';
+      ctx.fillStyle = level.inkCss;
       ctx.font = `700 ${Math.round(r * 1.15)}px system-ui, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';

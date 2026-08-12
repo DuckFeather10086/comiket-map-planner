@@ -11,18 +11,42 @@
 
 import { stripCellRect } from './mapdraw.js';
 
-/** Marker colours, also used as the sidebar colour picker. */
+/**
+ * How badly you want to be somewhere, in the order you would go.
+ *
+ * The colour is the plan: red means be in the queue before the doors open,
+ * yellow means get there today, blue means only if you walk past.  Markers, list
+ * badges and the printed sheets all read their colour from here, and the printed
+ * sheets carry the `tag`/`en` wording so a sheet works without the app.
+ *
+ * `ink` is what goes on top of the colour - yellow needs dark text where the
+ * other two take white.
+ */
 export const PALETTE = [
-  { key: 'red', label: '红', css: '#e03131', rgb: [0.88, 0.19, 0.19] },
-  { key: 'blue', label: '蓝', css: '#1971c2', rgb: [0.10, 0.44, 0.76] },
-  { key: 'green', label: '绿', css: '#2f9e44', rgb: [0.18, 0.62, 0.27] },
-  { key: 'orange', label: '橙', css: '#e8590c', rgb: [0.91, 0.35, 0.05] },
-  { key: 'purple', label: '紫', css: '#7048e8', rgb: [0.44, 0.28, 0.91] },
-  { key: 'teal', label: '青', css: '#0c8599', rgb: [0.05, 0.52, 0.60] },
+  { key: 'red', tag: 'P1', short: '必去', en: 'GO FIRST',
+    label: '开场就得冲 · 排队也要拿到',
+    css: '#e03131', rgb: [0.88, 0.19, 0.19], ink: [1, 1, 1], inkCss: '#fff' },
+  { key: 'amber', tag: 'P2', short: '要去', en: 'ANYTIME',
+    label: '当天一定要去 · 但不用赶开场',
+    css: '#f59f00', rgb: [0.96, 0.62, 0.00], ink: [0.25, 0.16, 0.02],
+    inkCss: '#40290a' },
+  { key: 'blue', tag: 'P3', short: '路过', en: 'IF PASSING',
+    label: '顺路瞅一眼 · 没时间就算了',
+    css: '#1971c2', rgb: [0.10, 0.44, 0.76], ink: [1, 1, 1], inkCss: '#fff' },
 ];
 
+/** Colours from before the levels meant something, and what they became. */
+const FOLDED = { orange: 'amber', yellow: 'amber', green: 'blue',
+                 teal: 'blue', purple: 'blue' };
+
 export const colorOf = key =>
-  PALETTE.find(c => c.key === key) || PALETTE[0];
+  PALETTE.find(c => c.key === (FOLDED[key] || key)) || PALETTE[0];
+
+/** The most urgent level among some entries, for a per-hall summary. */
+export const topColor = entries => {
+  const ranks = entries.map(e => PALETTE.indexOf(colorOf(e.color)));
+  return PALETTE[Math.min(...ranks)];
+};
 
 const FULLWIDTH = /[！-～]/g;
 const DASHES = /[-‐-―−ー－~]/g;
@@ -79,6 +103,8 @@ export class Layout {
   get event() { return this.doc.event; }
   get pages() { return this.doc.pages; }
   page(index) { return this.doc.pages[index]; }
+  /** The site plan printed on one of the sheets, if this map carries one. */
+  get overview() { return this.doc.overview || null; }
 
   /**
    * Parse a written placement such as "東ヨ-12a", "ヨ12", "西1 あ-05b".

@@ -33,8 +33,9 @@
       </div>
       <div class="row">
         <input id="in-note" placeholder="备注 / 目标（可选）" autocomplete="off">
-        <select id="in-color" title="颜色分组"></select>
       </div>
+      <div class="levels" id="in-level" role="radiogroup" aria-label="优先级"></div>
+      <p class="hint" id="level-hint"></p>
       <p class="hint" id="code-hint">点地图上的格子最快 · 也可输入 <code>東ヨ-12a</code> / <code>ヨ12a</code></p>
     </form>
 
@@ -74,6 +75,7 @@
 <dialog id="dlg-paste" class="dlg">
   <h2>批量粘贴</h2>
   <p>每行一条。可用 Tab / 逗号分隔：<code>配置<span class="sep">⇥</span>社团名<span class="sep">⇥</span>备注</code></p>
+  <p class="hint">全部按左侧当前选中的优先级导入，之后可逐条改。</p>
   <textarea id="paste-text" rows="12" placeholder="東ヨ-12a	サークル名	新刊
 西あ-05b	another circle
 南t-33a"></textarea>
@@ -88,11 +90,13 @@
   <div class="opts">
     <label><input type="checkbox" id="opt-day1" checked> 1日目（8/15 Sat）</label>
     <label><input type="checkbox" id="opt-day2" checked> 2日目（8/16 Sun）</label>
+    <label><input type="checkbox" id="opt-split" checked> 每天一个独立 PDF</label>
     <hr>
+    <label><input type="checkbox" id="opt-plan" checked> 首页放全馆平面图（哪个馆在哪）</label>
     <label><input type="checkbox" id="opt-zoom" checked> 追加各馆放大页（裁切到该馆）</label>
     <label><input type="checkbox" id="opt-list" checked> 追加巡回清单页</label>
-    <label><input type="checkbox" id="opt-split"> 每天分成独立文件</label>
   </div>
+  <p class="hint">每个 PDF 都含官方地图的全部 4 页，没标记的馆就留空。</p>
   <div class="dlg-actions">
     <button id="export-cancel" class="ghost">取消</button>
     <button id="export-ok" class="primary">生成</button>
