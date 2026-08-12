@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comiket 巡回地图生成器</title>
+<link rel="stylesheet" href="src/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🗺️</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>Comiket 巡回地图生成器 <span class="event" id="event-name">C108</span></h1>
+  <div class="days" role="tablist" id="day-tabs">
+    <button class="day" role="tab" data-day="1" aria-selected="true">1日目 <small>8/15 Sat</small></button>
+    <button class="day" role="tab" data-day="2" aria-selected="false">2日目 <small>8/16 Sun</small></button>
+  </div>
+  <div class="topbar-actions">
+    <button id="btn-export" class="primary">生成 PDF</button>
+    <button id="btn-menu" class="ghost" title="数据管理">⋯</button>
+  </div>
+</header>
+
+<main>
+  <aside class="sidebar">
+    <form id="add-form" class="add-form">
+      <div class="row">
+        <input id="in-code" placeholder="配置 例: 東ヨ-12a" autocomplete="off" required>
+        <button type="submit" title="添加">＋</button>
+      </div>
+      <div class="row">
+        <input id="in-name" placeholder="社团名（可选）" autocomplete="off">
+      </div>
+      <div class="row">
+        <input id="in-note" placeholder="备注 / 目标（可选）" autocomplete="off">
+        <select id="in-color" title="颜色分组"></select>
+      </div>
+      <p class="hint" id="code-hint">支持 <code>東ヨ-12a</code> / <code>ヨ12a</code> / <code>西1 あ-05b</code> 等写法</p>
+    </form>
+
+    <div class="list-head">
+      <span id="list-count">0 件</span>
+      <div class="list-actions">
+        <button id="btn-paste" class="ghost small">批量粘贴</button>
+        <button id="btn-sort" class="ghost small" title="按巡回顺序排序">排序</button>
+      </div>
+    </div>
+
+    <ol id="entry-list" class="entries"></ol>
+  </aside>
+
+  <section class="viewer">
+    <div class="viewer-bar">
+      <div class="pages" id="page-tabs"></div>
+      <div class="zoom">
+        <button id="zoom-out" title="缩小">−</button>
+        <span id="zoom-level">100%</span>
+        <button id="zoom-in" title="放大">＋</button>
+        <button id="zoom-fit" class="ghost small">适应</button>
+      </div>
+    </div>
+    <div class="canvas-wrap" id="canvas-wrap">
+      <div class="stage" id="stage">
+        <canvas id="map-canvas"></canvas>
+        <canvas id="marker-canvas"></canvas>
+      </div>
+      <div class="placing-banner" id="placing-banner" hidden>
+        点击地图为 <b id="placing-code"></b> 指定位置 · <button id="placing-cancel" class="ghost small">取消</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="loader" id="loader"><div class="spin"></div><p id="loader-text">加载地图…</p></div>
+
+<dialog id="dlg-source" class="dlg">
+  <h2>需要官方会场地图 PDF</h2>
+  <p>本工具在你的浏览器里把标记画到 Comiket 官方地图上，不会上传任何数据。</p>
+  <p>请下载官方 PDF 后拖到这里（只需一次，之后会缓存在本地浏览器）：</p>
+  <p><a id="map-link" href="https://www.comiket.co.jp/info-a/C108/C108Map_all_B4.pdf" target="_blank" rel="noopener">下载 C108Map_all_B4.pdf</a></p>
+  <label class="drop" id="drop-zone">
+    <input type="file" id="file-pdf" accept="application/pdf" hidden>
+    <span>拖放 PDF 到此处，或点击选择文件</span>
+  </label>
+  <p class="err" id="source-err" hidden></p>
+</dialog>
+
+<dialog id="dlg-paste" class="dlg">
+  <h2>批量粘贴</h2>
+  <p>每行一条。可用 Tab / 逗号分隔：<code>配置<span class="sep">⇥</span>社团名<span class="sep">⇥</span>备注</code></p>
+  <textarea id="paste-text" rows="12" placeholder="東ヨ-12a	サークル名	新刊
+西あ-05b	another circle
+南t-33a"></textarea>
+  <div class="dlg-actions">
+    <button id="paste-cancel" class="ghost">取消</button>
+    <button id="paste-ok" class="primary">导入到当前日</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-export" class="dlg">
+  <h2>生成 PDF</h2>
+  <div class="opts">
+    <label><input type="checkbox" id="opt-day1" checked> 1日目（8/15 Sat）</label>
+    <label><input type="checkbox" id="opt-day2" checked> 2日目（8/16 Sun）</label>
+    <hr>
+    <label><input type="checkbox" id="opt-zoom" checked> 追加各馆放大页（更适合现场看）</label>
+    <label><input type="checkbox" id="opt-list" checked> 追加巡回清单页</label>
+    <label><input type="checkbox" id="opt-split"> 每天分成独立文件</label>
+  </div>
+  <div class="dlg-actions">
+    <button id="export-cancel" class="ghost">取消</button>
+    <button id="export-ok" class="primary">生成</button>
+  </div>
+  <p class="err" id="export-err" hidden></p>
+</dialog>
+
+<dialog id="dlg-menu" class="dlg">
+  <h2>数据管理</h2>
+  <div class="dlg-actions column">
+    <button id="btn-save-json" class="ghost">导出清单 JSON（备份）</button>
+    <button id="btn-load-json" class="ghost">导入清单 JSON</button>
+    <button id="btn-save-csv" class="ghost">导出 CSV</button>
+    <button id="btn-clear" class="danger">清空全部数据</button>
+  </div>
+  <input type="file" id="file-json" accept="application/json" hidden>
+  <p class="hint">数据保存在本浏览器的 localStorage 中，不会离开你的设备。</p>
+  <div class="dlg-actions"><button id="menu-close" class="ghost">关闭</button></div>
+</dialog>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
