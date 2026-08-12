@@ -35,7 +35,7 @@
         <input id="in-note" placeholder="备注 / 目标（可选）" autocomplete="off">
         <select id="in-color" title="颜色分组"></select>
       </div>
-      <p class="hint" id="code-hint">支持 <code>東ヨ-12a</code> / <code>ヨ12a</code> / <code>西1 あ-05b</code> 等写法</p>
+      <p class="hint" id="code-hint">点地图上的格子最快 · 也可输入 <code>東ヨ-12a</code> / <code>ヨ12a</code></p>
     </form>
 
     <div class="list-head">
@@ -51,39 +51,24 @@
 
   <section class="viewer">
     <div class="viewer-bar">
-      <div class="pages" id="page-tabs"></div>
+      <div class="pages" id="hall-tabs"></div>
       <div class="zoom">
         <button id="zoom-out" title="缩小">−</button>
         <span id="zoom-level">100%</span>
         <button id="zoom-in" title="放大">＋</button>
         <button id="zoom-fit" class="ghost small">适应</button>
+        <span class="hover-status" id="hover-status"></span>
       </div>
     </div>
     <div class="canvas-wrap" id="canvas-wrap">
       <div class="stage" id="stage">
         <canvas id="map-canvas"></canvas>
-        <canvas id="marker-canvas"></canvas>
-      </div>
-      <div class="placing-banner" id="placing-banner" hidden>
-        点击地图为 <b id="placing-code"></b> 指定位置 · <button id="placing-cancel" class="ghost small">取消</button>
       </div>
     </div>
   </section>
 </main>
 
-<div class="loader" id="loader"><div class="spin"></div><p id="loader-text">加载地图…</p></div>
-
-<dialog id="dlg-source" class="dlg">
-  <h2>需要官方会场地图 PDF</h2>
-  <p>本工具在你的浏览器里把标记画到 Comiket 官方地图上，不会上传任何数据。</p>
-  <p>请下载官方 PDF 后拖到这里（只需一次，之后会缓存在本地浏览器）：</p>
-  <p><a id="map-link" href="https://www.comiket.co.jp/info-a/C108/C108Map_all_B4.pdf" target="_blank" rel="noopener">下载 C108Map_all_B4.pdf</a></p>
-  <label class="drop" id="drop-zone">
-    <input type="file" id="file-pdf" accept="application/pdf" hidden>
-    <span>拖放 PDF 到此处，或点击选择文件</span>
-  </label>
-  <p class="err" id="source-err" hidden></p>
-</dialog>
+<div class="loader" id="loader"><div class="spin"></div><p id="loader-text">绘制会场…</p></div>
 
 <dialog id="dlg-paste" class="dlg">
   <h2>批量粘贴</h2>
@@ -103,7 +88,6 @@
     <label><input type="checkbox" id="opt-day1" checked> 1日目（8/15 Sat）</label>
     <label><input type="checkbox" id="opt-day2" checked> 2日目（8/16 Sun）</label>
     <hr>
-    <label><input type="checkbox" id="opt-zoom" checked> 追加各馆放大页（更适合现场看）</label>
     <label><input type="checkbox" id="opt-list" checked> 追加巡回清单页</label>
     <label><input type="checkbox" id="opt-split"> 每天分成独立文件</label>
   </div>

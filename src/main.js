@@ -1,26 +1,24 @@
 import { Layout, PALETTE, colorOf } from './layout.js';
 import { Store, parsePaste } from './store.js';
-import { loadMap } from './pdfsource.js';
 import { Viewer } from './viewer.js';
 import { buildPdf, planMarkers } from './exporter.js';
+import { markKey } from './mapdraw.js';
 
 const LAYOUT_URL = 'data/C108.json';
 const $ = id => document.getElementById(id);
 
 const ui = {
   loader: $('loader'), loaderText: $('loader-text'),
-  dayTabs: $('day-tabs'), pageTabs: $('page-tabs'),
+  dayTabs: $('day-tabs'), hallTabs: $('hall-tabs'),
   list: $('entry-list'), listCount: $('list-count'),
   form: $('add-form'), code: $('in-code'), name: $('in-name'),
   note: $('in-note'), color: $('in-color'), hint: $('code-hint'),
-  wrap: $('canvas-wrap'), stage: $('stage'),
-  banner: $('placing-banner'), bannerCode: $('placing-code'),
-  zoomLevel: $('zoom-level'),
+  wrap: $('canvas-wrap'), stage: $('stage'), canvas: $('map-canvas'),
+  zoomLevel: $('zoom-level'), status: $('hover-status'),
 };
 
-let layout, store, viewer, mapBytes;
+let layout, store, viewer;
 let editingId = null;
-let placingId = null;
 let activeId = null;
 
 boot().catch(err => {
@@ -32,90 +30,38 @@ async function boot() {
   layout = await Layout.load(LAYOUT_URL);
   store = new Store(layout.event);
   $('event-name').textContent = layout.event;
-  $('map-link').href = `https://www.comiket.co.jp/info-a/${layout.event}/${layout.doc.source}`;
-
-  for (const c of PALETTE) {
-    ui.color.append(new Option(c.label, c.key));
-  }
-
-  ui.loaderText.textContent = '加载会场地图…';
-  const { bytes, verified } = await loadMap(layout.doc, askForPdf);
-  mapBytes = bytes;
-  if (!verified) {
-    console.warn('map file differs from the one the layout was built against');
-  }
+  for (const c of PALETTE) ui.color.append(new Option(c.label, c.key));
 
   viewer = new Viewer({
-    wrap: ui.wrap, stage: ui.stage,
-    mapCanvas: $('map-canvas'), markerCanvas: $('marker-canvas'),
+    wrap: ui.wrap, stage: ui.stage, canvas: ui.canvas, layout,
   });
-  await viewer.open(mapBytes);
-  viewer.addEventListener('mapclick', onMapClick);
+  viewer.addEventListener('cellclick', ev => onCellClick(ev.detail));
+  viewer.addEventListener('hover', ev => onHover(ev.detail));
   viewer.addEventListener('render', () => {
-    ui.zoomLevel.textContent = `${Math.round(viewer.scale * 100)}%`;
+    ui.zoomLevel.textContent = `${Math.round(viewer.zoom * 100)}%`;
   });
 
-  buildPageTabs();
-  await viewer.show(0);
-  await viewer.fitWidth();
-
+  buildHallTabs();
   wireUi();
   store.addEventListener('change', render);
+  viewer.show(0);
   render();
   ui.loader.hidden = true;
 }
 
-/* ------------------------------------------------------------------ map file */
-
-function askForPdf() {
-  const dlg = $('dlg-source');
-  const input = $('file-pdf');
-  const drop = $('drop-zone');
-  ui.loader.hidden = true;
-  dlg.showModal();
-
-  return new Promise(resolve => {
-    const accept = file => {
-      if (!file) return;
-      if (file.type && file.type !== 'application/pdf') {
-        $('source-err').textContent = '请选择 PDF 文件';
-        $('source-err').hidden = false;
-        return;
-      }
-      file.arrayBuffer().then(buf => {
-        dlg.close();
-        ui.loader.hidden = false;
-        resolve(buf);
-      });
-    };
-    input.addEventListener('change', () => accept(input.files[0]));
-    drop.addEventListener('click', () => input.click());
-    drop.addEventListener('dragover', ev => {
-      ev.preventDefault();
-      drop.classList.add('over');
-    });
-    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
-    drop.addEventListener('drop', ev => {
-      ev.preventDefault();
-      drop.classList.remove('over');
-      accept(ev.dataTransfer.files[0]);
-    });
-  });
-}
-
 /* --------------------------------------------------------------------- chrome */
 
-function buildPageTabs() {
-  ui.pageTabs.innerHTML = '';
-  layout.pages.forEach((page, index) => {
+function buildHallTabs() {
+  ui.hallTabs.innerHTML = '';
+  viewer.panels.forEach((panel, index) => {
     const button = document.createElement('button');
-    button.dataset.page = index;
-    button.innerHTML = `${page.halls.join('・')}<span class="n" hidden>0</span>`;
-    button.addEventListener('click', async () => {
-      await viewer.show(index);
+    button.dataset.panel = index;
+    button.innerHTML = `${panel.hall}<span class="n" hidden>0</span>`;
+    button.addEventListener('click', () => {
+      viewer.show(index);
       render();
     });
-    ui.pageTabs.append(button);
+    ui.hallTabs.append(button);
   });
 }
 
@@ -143,32 +89,29 @@ function wireUi() {
       store.update(editingId, patch);
       setEditing(null);
     } else {
-      const entry = store.add(patch);
-      activeId = entry.id;
+      activeId = store.add(patch).id;
     }
+    const colour = patch.color;
     ui.form.reset();
-    ui.color.value = patch.color;
+    ui.color.value = colour;
     ui.code.focus();
     updateHint();
   });
 
   ui.code.addEventListener('input', updateHint);
 
-  $('zoom-in').addEventListener('click', () => viewer.zoomBy(1.25));
-  $('zoom-out').addEventListener('click', () => viewer.zoomBy(0.8));
+  $('zoom-in').addEventListener('click', () => viewer.zoomBy(1.3));
+  $('zoom-out').addEventListener('click', () => viewer.zoomBy(1 / 1.3));
   $('zoom-fit').addEventListener('click', () => viewer.fitWidth());
+  window.addEventListener('resize', () => viewer.render());
 
   $('btn-sort').addEventListener('click', () => {
-    const ordered = planMarkers(layout, store.forDay()).map(m => m.entry.id);
-    const rank = new Map(ordered.map((id, i) => [id, i]));
-    store.entries.sort((a, b) => {
-      if (a.day !== b.day) return a.day - b.day;
-      return (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9);
-    });
+    const order = new Map(planMarkers(layout, store.forDay())
+      .map((m, i) => [m.entry.id, i]));
+    store.entries.sort((a, b) => (a.day - b.day)
+      || (order.get(a.id) ?? 1e9) - (order.get(b.id) ?? 1e9));
     store.save();
   });
-
-  $('placing-cancel').addEventListener('click', () => setPlacing(null));
 
   wirePaste();
   wireExport();
@@ -179,25 +122,25 @@ function updateHint() {
   const value = ui.code.value.trim();
   if (!value) {
     ui.hint.className = 'hint';
-    ui.hint.innerHTML = '支持 <code>東ヨ-12a</code> / <code>ヨ12a</code> / <code>西1 あ-05b</code> 等写法';
+    ui.hint.innerHTML = '点地图上的格子最快 · 也可输入 <code>東ヨ-12a</code> / <code>ヨ12a</code>';
     return;
   }
-  const result = layout.resolve(value);
-  if (result.ok) {
+  const r = layout.resolve(value);
+  if (r.ok) {
     ui.hint.className = 'hint';
-    ui.hint.textContent = `✓ ${result.hall} ${result.block}ブロック ${result.number}${result.sub} — ${layout.page(result.page).halls.join('・')}`;
-  } else if (result.reason === 'wall') {
+    ui.hint.textContent = `✓ ${r.hall} ${r.block}ブロック ${r.number}${r.sub}`;
+  } else if (r.reason === 'wall') {
     ui.hint.className = 'hint';
-    ui.hint.textContent = `${result.hall}（${result.block}ブロック）— 壁区不支持自动定位，添加后按 📍 在地图上点选`;
-  } else if (result.reason === 'number') {
+    ui.hint.textContent = `${r.hall} — 壁区没有网格坐标，会列在图边和清单上`;
+  } else if (r.reason === 'number') {
     ui.hint.className = 'hint bad';
-    ui.hint.textContent = `${result.block} 区只有 1–${result.max} 号`;
-  } else if (result.reason === 'block') {
+    ui.hint.textContent = `${r.block} 区只有 1–${r.max} 号`;
+  } else if (r.reason === 'block') {
     ui.hint.className = 'hint bad';
-    ui.hint.textContent = `未知区块「${result.block}」`;
+    ui.hint.textContent = `未知区块「${r.block}」`;
   } else {
     ui.hint.className = 'hint bad';
-    ui.hint.textContent = '无法识别配置，添加后可在地图上手动点选位置';
+    ui.hint.textContent = '无法识别配置';
   }
 }
 
@@ -211,31 +154,40 @@ function render() {
   ui.listCount.textContent = `${entries.length} 件`;
 
   const counts = new Map();
-  for (const m of markers) counts.set(m.page, (counts.get(m.page) || 0) + 1);
-  for (const button of ui.pageTabs.children) {
-    const index = Number(button.dataset.page);
-    button.setAttribute('aria-pressed', String(index === viewer.pageIndex));
+  for (const m of markers) {
+    const key = `${m.page}/${m.hall}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  for (const button of ui.hallTabs.children) {
+    const panel = viewer.panels[Number(button.dataset.panel)];
+    button.setAttribute('aria-pressed',
+      String(Number(button.dataset.panel) === viewer.index));
+    const n = [...counts].reduce((sum, [key, c]) => {
+      const [page, hall] = key.split('/');
+      return sum + (Number(page) === panel.pageIndex && hall.startsWith(panel.hall) ? c : 0);
+    }, 0);
     const badge = button.querySelector('.n');
-    const n = counts.get(index) || 0;
     badge.textContent = n;
     badge.hidden = n === 0;
   }
 
-  const info = new Map(entries.map(e => [e.id, layout.resolve(e.code)]));
-  renderList(entries, byEntry, info);
+  const marks = new Map();
+  for (const m of markers) {
+    if (m.placed) {
+      marks.set(markKey(m.block, m.number),
+                { index: m.index, color: m.color, id: m.entry.id });
+    }
+  }
+  // wall blocks run around a whole page's halls, so their notes belong on every
+  // panel of that page rather than one named hall
+  const panel = viewer.panel;
+  const notes = markers.filter(m => !m.placed && m.page === panel.pageIndex);
+  viewer.setMarks(marks, notes);
 
-  viewer.drawMarkers(markers
-    .filter(m => m.page === viewer.pageIndex)
-    .map(m => ({
-      index: m.index,
-      css: colorOf(m.entry.color).css,
-      rect: m.rect,
-      point: m.point,
-      active: m.entry.id === activeId,
-    })));
+  renderList(entries, byEntry);
 }
 
-function renderList(entries, byEntry, info) {
+function renderList(entries, byEntry) {
   const ordered = [...entries].sort((a, b) => {
     const ma = byEntry.get(a.id), mb = byEntry.get(b.id);
     if (!ma && !mb) return 0;
@@ -248,8 +200,8 @@ function renderList(entries, byEntry, info) {
   let hall = null;
   for (const entry of ordered) {
     const marker = byEntry.get(entry.id);
-    const resolved = info.get(entry.id);
-    const group = marker ? marker.hall : (resolved.hall || '未识别');
+    const group = marker ? (marker.placed ? marker.hall : `${marker.hall}（未定位）`)
+                         : '未识别';
     if (group !== hall) {
       hall = group;
       const head = document.createElement('li');
@@ -257,17 +209,15 @@ function renderList(entries, byEntry, info) {
       head.textContent = group;
       ui.list.append(head);
     }
-    ui.list.append(renderRow(entry, marker, resolved));
+    ui.list.append(renderRow(entry, marker));
   }
 }
 
-function renderRow(entry, marker, resolved) {
-  const needsPin = !marker && resolved.reason === 'wall';
+function renderRow(entry, marker) {
   const li = document.createElement('li');
   li.className = 'entry';
   li.classList.toggle('active', entry.id === activeId);
-  li.classList.toggle('bad', !marker && !needsPin);
-  li.classList.toggle('pinned', Boolean(entry.pin));
+  li.classList.toggle('bad', !marker);
 
   const badge = document.createElement('span');
   badge.className = 'idx';
@@ -281,23 +231,12 @@ function renderRow(entry, marker, resolved) {
   code.textContent = marker ? marker.code : entry.code;
   const name = document.createElement('div');
   name.className = 'name';
-  const detail = [entry.name, entry.note].filter(Boolean).join(' · ');
-  name.textContent = needsPin ? (detail ? `${detail} · 按 📍 点选位置` : '按 📍 点选位置') : (detail || ' ');
+  name.textContent = [entry.name, entry.note].filter(Boolean).join(' · ') || ' ';
   body.append(code, name);
 
   const tools = document.createElement('div');
   tools.className = 'tools';
   tools.append(
-    tool('📍', entry.pin ? '清除手动位置' : '在地图上手动点选位置', async ev => {
-      ev.stopPropagation();
-      if (entry.pin) return store.update(entry.id, { pin: null });
-      const target = marker?.page ?? resolved.page;
-      if (Number.isInteger(target) && target !== viewer.pageIndex) {
-        await viewer.show(target);
-        render();
-      }
-      setPlacing(entry.id);
-    }),
     tool('✎', '编辑', ev => {
       ev.stopPropagation();
       setEditing(entry.id);
@@ -309,14 +248,15 @@ function renderRow(entry, marker, resolved) {
   );
 
   li.append(badge, body, tools);
-  li.addEventListener('click', async () => {
+  li.addEventListener('click', () => {
     activeId = entry.id;
-    const target = marker?.page ?? resolved.page;
-    if (Number.isInteger(target) && target !== viewer.pageIndex) {
-      await viewer.show(target);
+    if (marker && marker.placed) {
+      if (!viewer.showHall(marker.page, marker.hall)) return;
+      render();
+      viewer.focus(marker.block, marker.number);
+      return;
     }
     render();
-    if (marker) viewer.focus(marker);
   });
   return li;
 }
@@ -349,21 +289,27 @@ function setEditing(id) {
   updateHint();
 }
 
-function setPlacing(id) {
-  placingId = id;
-  viewer.setPlacing(Boolean(id));
-  ui.banner.hidden = !id;
-  if (id) {
-    const entry = store.entries.find(e => e.id === id);
-    ui.bannerCode.textContent = entry.code;
+/* ------------------------------------------------------------ map interaction */
+
+function onCellClick(hit) {
+  const code = `${hit.hall}${hit.block}-${String(hit.number).padStart(2, '0')}`;
+  const existing = store.forDay().find(e => {
+    const r = layout.resolve(e.code);
+    return r.ok && r.block === hit.block && r.number === hit.number;
+  });
+  if (existing) {
+    activeId = existing.id;
+    setEditing(existing.id);
+    render();
+    return;
   }
+  activeId = store.add({ code, color: ui.color.value }).id;
 }
 
-function onMapClick(ev) {
-  if (!placingId) return;
-  const { page, x, y } = ev.detail;
-  store.update(placingId, { pin: { page, x, y } });
-  setPlacing(null);
+function onHover(hit) {
+  ui.status.textContent = hit
+    ? `${hit.hall} ${hit.block}-${String(hit.number).padStart(2, '0')}`
+    : '';
 }
 
 /* -------------------------------------------------------------------- dialogs */
@@ -398,9 +344,8 @@ function wireExport() {
     button.textContent = '生成中…';
     try {
       const files = await buildPdf({
-        mapBytes, layout, store, days,
+        layout, store, days,
         options: {
-          zoomPages: $('opt-zoom').checked,
           checklist: $('opt-list').checked,
           splitDays: $('opt-split').checked,
         },
@@ -427,16 +372,14 @@ function wireMenu() {
   $('btn-save-json').addEventListener('click', () =>
     download(`${layout.event}_wishlist.json`, new TextEncoder().encode(store.toJSON())));
   $('btn-save-csv').addEventListener('click', () =>
-    download(`${layout.event}_wishlist.csv`,
-             new TextEncoder().encode('﻿' + store.toCSV())));
+    download(`${layout.event}_wishlist.csv`, new TextEncoder().encode('﻿' + store.toCSV())));
 
   $('btn-load-json').addEventListener('click', () => $('file-json').click());
   $('file-json').addEventListener('change', async ev => {
     const file = ev.target.files[0];
     if (!file) return;
     try {
-      const data = JSON.parse(await file.text());
-      store.replace(data.entries || []);
+      store.replace(JSON.parse(await file.text()).entries || []);
       dlg.close();
     } catch (err) {
       alert(`导入失败：${err.message}`);

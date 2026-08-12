@@ -204,7 +204,6 @@ main {
 .entry .tools { display: flex; gap: 2px; opacity: 0; }
 .entry:hover .tools, .entry.active .tools { opacity: 1; }
 .entry .tools button { padding: 2px 6px; font-size: 12px; border-color: transparent; background: transparent; }
-.entry.pinned .code::after { content: "📍"; font-size: 10px; margin-left: 4px; }
 
 /* ---------- viewer ---------- */
 .viewer { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -229,26 +228,16 @@ main {
 .zoom button { padding: 4px 10px; }
 #zoom-level { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; min-width: 42px; text-align: center; }
 
-.canvas-wrap { flex: 1; overflow: auto; position: relative; background: #8b9099; }
-.stage { position: relative; margin: 16px auto; width: max-content; box-shadow: var(--shadow); }
-.stage canvas { display: block; }
-#marker-canvas { position: absolute; inset: 0; }
-.canvas-wrap.placing { cursor: crosshair; }
+.canvas-wrap { flex: 1; overflow: auto; position: relative; background: var(--bg); }
+.stage { position: relative; margin: 16px auto; width: max-content; }
+.stage canvas { display: block; background: #fff; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
 
-.placing-banner {
-  position: sticky;
-  bottom: 12px;
-  left: 0;
-  margin: 0 auto;
-  width: max-content;
-  padding: 8px 14px;
-  border-radius: 999px;
-  background: var(--ink);
-  color: var(--bg);
-  box-shadow: var(--shadow);
+.hover-status {
+  min-width: 96px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--muted);
 }
-
-.placing-banner button { color: var(--bg); border-color: transparent; }
 
 /* ---------- loader + dialogs ---------- */
 .loader {

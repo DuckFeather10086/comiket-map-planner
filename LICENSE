@@ -22,6 +22,11 @@ SOFTWARE.
 
 ---
 
-The Comic Market hall map PDF (maps/*.pdf) is not part of this Software.  It is
-the copyrighted work of the Comic Market Preparatory Committee and is not
-covered by this licence.  This project is unaffiliated with the Committee.
+vendor/kana-subset.ttf is a subset of Droid Sans Fallback, Copyright (C) 2008
+The Android Open Source Project, licensed under the Apache License 2.0.  See
+vendor/DroidSansFallback-LICENSE.txt.
+
+The Comic Market hall map PDF is not part of this Software and is not included
+in this repository; it is only read by tools/extract_layout.py when regenerating
+coordinates.  This project is unaffiliated with the Comic Market Preparatory
+Committee.

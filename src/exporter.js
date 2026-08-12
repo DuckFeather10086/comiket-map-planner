@@ -1,50 +1,58 @@
 /**
- * PDF output: the official map with the wishlist stamped onto it.
+ * PDF output: the map is drawn, not borrowed.
  *
- * Everything stays vector.  Map sheets are produced with a single copyPages()
- * call so pdf-lib shares one copy of the artwork between them and keeps the
- * original compressed streams; each sheet then gets its own content array so
- * markers do not bleed across sheets, and a per-hall zoom sheet is just another
- * copy with its page boxes cropped to that hall.  Re-embedding the page per
- * sheet instead would decompress the artwork and inflate the file by ~45%.
- *
- * The one raster part is the checklist, painted on a canvas and embedded as an
- * image: that avoids shipping a multi-megabyte CJK font to set circle names,
- * and costs about 40 kB a page.
+ * Every sheet comes out of the same `mapdraw` routine that paints the screen, so
+ * what you print is what you saw.  Sheets are all vector: the space grid and
+ * markers as shapes, kana block letters and hall names through a 9 kB font
+ * subset holding only those glyphs, everything ASCII through the built-in
+ * Helvetica.  The one raster part is the checklist, painted on a canvas because
+ * circle names are arbitrary Japanese and a font covering them would be megabytes.
  */
 
 import { colorOf } from './layout.js';
+import { allPanels, drawPanel, markKey } from './mapdraw.js';
+import { PdfPen, fit } from './pens.js';
 
 const A4 = { w: 595.28, h: 841.89 };
+const MARGIN = 22;
 
-let pdfLibPromise;
+let libPromise;
 
-function loadPdfLib() {
-  pdfLibPromise ??= new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = new URL('../vendor/pdf-lib.min.js', import.meta.url).href;
-    script.onload = () => resolve(window.PDFLib);
-    script.onerror = () => reject(new Error('pdf-lib-load-failed'));
-    document.head.append(script);
+function loadLibs() {
+  libPromise ??= (async () => {
+    await Promise.all([
+      inject(new URL('../vendor/pdf-lib.min.js', import.meta.url).href),
+      inject(new URL('../vendor/fontkit.umd.min.js', import.meta.url).href),
+    ]);
+    const font = await fetch(new URL('../vendor/kana-subset.ttf', import.meta.url))
+      .then(r => r.arrayBuffer());
+    return { lib: window.PDFLib, fontkit: window.fontkit, cjkFont: font };
+  })();
+  return libPromise;
+}
+
+function inject(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.onload = resolve;
+    el.onerror = () => reject(new Error(`failed to load ${src}`));
+    document.head.append(el);
   });
-  return pdfLibPromise;
 }
 
 const DAY_LABEL = {
-  1: { zh: '1日目', date: '2026-08-15 Sat' },
-  2: { zh: '2日目', date: '2026-08-16 Sun' },
+  1: { jp: '1日目', date: '2026-08-15 Sat' },
+  2: { jp: '2日目', date: '2026-08-16 Sun' },
 };
-
-const ROMAJI = { 東: 'East', 西: 'West', 南: 'South' };
-const romanise = hall => hall.replace(/[東西南]/g, m => ROMAJI[m] + ' ').trim();
 
 /* ------------------------------------------------------------------ planning */
 
 /** Markers for one day, numbered in walking order. */
 export function planMarkers(layout, entries) {
   const found = entries
-    .map(entry => ({ entry, r: layout.resolve(entry.code), pin: entry.pin }))
-    .filter(m => m.r.ok || m.pin);
+    .map(entry => ({ entry, r: layout.resolve(entry.code) }))
+    .filter(m => m.r.ok || m.r.reason === 'wall');
 
   found.sort((a, b) => {
     const ka = sortKey(layout, a), kb = sortKey(layout, b);
@@ -54,247 +62,157 @@ export function planMarkers(layout, entries) {
     return 0;
   });
 
-  // a hand-placed pin wins over the resolved cell: it is the user correcting us
   return found.map((m, i) => ({
     index: i + 1,
     entry: m.entry,
-    rgb: colorOf(m.entry.color).rgb,
-    page: m.pin ? m.pin.page : m.r.page,
-    hall: m.r.hall || '—',
-    rect: m.pin ? null : m.r.rect,
-    point: m.pin ? { x: m.pin.x, y: m.pin.y } : null,
-    code: m.r.ok ? m.r.canonical : m.entry.code,
+    color: m.entry.color,
+    page: m.r.page,
+    hall: m.r.hall,
+    block: m.r.block,
+    number: m.r.number,
+    placed: m.r.ok,
+    code: m.r.ok ? m.r.canonical : `${m.r.hall}${m.r.block}-${m.r.number}${m.r.sub}`,
   }));
 }
 
 function sortKey(layout, m) {
-  // wall blocks and hand-pinned entries have no grid position; sort them after
-  // the placed ones on their page so the numbering still runs front to back
-  if (!m.r.ok) return [m.pin ? m.pin.page : 9, 9, 9e9, m.r.number ?? 9e9];
-  const page = layout.page(m.r.page);
+  const page = layout.page(m.r.page ?? 9);
+  if (!m.r.ok) return [m.r.page ?? 9, 99, 9e9, m.r.number ?? 9e9];
   return [m.r.page, page.halls.indexOf(m.r.hall), m.r.rect.block.x, m.r.number];
 }
 
-/** Sheets to produce for one day, in printing order. */
-function planDay(layout, store, day, options) {
-  const entries = store.forDay(day);
-  if (!entries.length) return null;
-
-  const markers = planMarkers(layout, entries);
-  const placed = new Set(markers.map(m => m.entry.id));
-  // wall blocks and codes we could not read still belong on the checklist,
-  // otherwise the printed plan silently loses part of the wishlist
-  const unplaced = entries.filter(e => !placed.has(e.id));
-
-  const byPage = new Map();
-  for (const marker of markers) {
-    if (!byPage.has(marker.page)) byPage.set(marker.page, []);
-    byPage.get(marker.page).push(marker);
+/** Group a day's markers by the panel they belong to. */
+export function groupByPanel(layout, markers) {
+  const panels = allPanels(layout);
+  const byHall = new Map();
+  for (const m of markers) {
+    const key = `${m.page}/${m.hall}`;
+    if (!byHall.has(key)) byHall.set(key, []);
+    byHall.get(key).push(m);
   }
-
-  const sheets = [];
-  for (const pageIndex of [...byPage.keys()].sort((a, b) => a - b)) {
-    const pageMarkers = byPage.get(pageIndex);
-    sheets.push({ pageIndex, hall: null, day, markers: pageMarkers });
-    if (!options.zoomPages) continue;
-    for (const hall of new Set(pageMarkers.map(m => m.hall))) {
-      const box = layout.hallBox(pageIndex, hall);
-      if (box) sheets.push({ pageIndex, hall, day, markers: pageMarkers, box });
-    }
+  const out = [];
+  for (const panel of panels) {
+    const placed = byHall.get(`${panel.pageIndex}/${panel.hall}`) || [];
+    // a wall block runs around all the halls on its page, so its note goes on
+    // each of that page's sheets rather than one named hall
+    const notes = markers.filter(m => !m.placed && m.page === panel.pageIndex);
+    if (placed.length || notes.length) out.push({ panel, markers: placed, notes });
   }
-  return { day, sheets, markers, unplaced };
+  const orphans = markers.filter(
+    m => !m.placed && !panels.some(p => p.pageIndex === m.page));
+  return { sheets: out, orphans };
 }
 
 /* -------------------------------------------------------------------- output */
 
-/**
- * Build the annotated PDF(s).
- * @returns {Promise<Array<{name: string, bytes: Uint8Array}>>}
- */
-export async function buildPdf({ mapBytes, layout, store, days, options }) {
-  const lib = await loadPdfLib();
-  const { PDFDocument } = lib;
-  const source = await PDFDocument.load(mapBytes);
+export async function buildPdf({ layout, store, days, options }) {
+  const { lib, fontkit, cjkFont } = await loadLibs();
+  const { PDFDocument, StandardFonts, rgb } = lib;
 
   const jobs = options.splitDays
-    ? days.map(day => ({ days: [day], suffix: DAY_LABEL[day].zh }))
-    : [{ days, suffix: days.length > 1 ? '全日程' : DAY_LABEL[days[0]].zh }];
+    ? days.map(day => ({ days: [day], suffix: DAY_LABEL[day].jp }))
+    : [{ days, suffix: days.length > 1 ? '全日程' : DAY_LABEL[days[0]].jp }];
 
   const outputs = [];
   for (const job of jobs) {
-    const plans = job.days.map(day => planDay(layout, store, day, options)).filter(Boolean);
+    const plans = job.days
+      .map(day => ({ day, entries: store.forDay(day) }))
+      .filter(p => p.entries.length);
     if (!plans.length) continue;
 
-    const bytes = await renderDocument({ lib, source, layout, plans, options });
-    outputs.push({ name: `${layout.event}_${job.suffix}_巡回地図.pdf`, bytes });
+    const doc = await PDFDocument.create();
+    doc.registerFontkit(fontkit);
+    doc.setTitle(`${layout.event} 巡回地図`);
+    doc.setCreator('comiket-map-planner');
+    const fonts = {
+      latin: await doc.embedFont(StandardFonts.Helvetica),
+      bold: await doc.embedFont(StandardFonts.HelveticaBold),
+      cjk: await doc.embedFont(cjkFont, { subset: false }),
+    };
+
+    for (const plan of plans) {
+      const markers = planMarkers(layout, plan.entries);
+      const { sheets, orphans } = groupByPanel(layout, markers);
+
+      for (const sheet of sheets) {
+        drawSheet({ doc, rgb, fonts, sheet, day: plan.day, layout });
+      }
+      if (options.checklist) {
+        const placed = new Set(markers.map(m => m.entry.id));
+        await addChecklist(doc, plan.day, markers,
+                           plan.entries.filter(e => !placed.has(e.id)), orphans);
+      }
+    }
+
+    outputs.push({
+      name: `${layout.event}_${job.suffix}_巡回地図.pdf`,
+      bytes: await doc.save(),
+    });
   }
   return outputs;
 }
 
-async function renderDocument({ lib, source, layout, plans, options }) {
-  const { PDFDocument, rgb, StandardFonts } = lib;
-  const out = await PDFDocument.create();
-  out.setTitle(`${layout.event} 巡回地図`);
-  out.setCreator('comiket-map-planner');
-  const font = await out.embedFont(StandardFonts.HelveticaBold);
+function drawSheet({ doc, rgb, fonts, sheet, day }) {
+  const { panel } = sheet;
+  const box = {
+    x: panel.box.x, y: panel.box.y,
+    w: panel.box.w, h: panel.box.h + panel.header,
+  };
+  // portrait or landscape, whichever blows the hall up more
+  const landscape = box.w / box.h >= 1;
+  const size = landscape ? [A4.h, A4.w] : [A4.w, A4.h];
+  const page = doc.addPage(size);
 
-  // one copyPages call for every sheet in the document: pdf-lib caches copied
-  // objects per call, so separate calls would duplicate the whole map
-  const sheets = plans.flatMap(plan => plan.sheets);
-  const copied = sheets.length
-    ? await out.copyPages(source, sheets.map(s => s.pageIndex))
-    : [];
+  const target = {
+    x: MARGIN, y: MARGIN,
+    w: size[0] - MARGIN * 2, h: size[1] - MARGIN * 2 - 14,
+  };
+  const pen = new PdfPen(page, fit(box, target), fonts, rgb);
 
-  let cursor = 0;
-  for (const plan of plans) {
-    for (const sheet of plan.sheets) {
-      const page = copied[cursor++];
-      out.addPage(page);
-      isolateContents(out, page, lib);
-
-      for (const marker of sheet.markers) {
-        drawMarker(page, marker, font, rgb);
-      }
-
-      if (sheet.box) {
-        const { left, bottom, right, top } = sheet.box;
-        const w = right - left, h = top - bottom;
-        page.setMediaBox(left, bottom, w, h);
-        page.setCropBox(left, bottom, w, h);
-        page.setBleedBox(left, bottom, w, h);
-        page.setTrimBox(left, bottom, w, h);
-        stampHeader(page, font, rgb,
-          `DAY ${sheet.day} - ${romanise(sheet.hall)}`, left, top);
-      } else {
-        const meta = layout.page(sheet.pageIndex);
-        stampHeader(page, font, rgb,
-          `DAY ${sheet.day} - ${DAY_LABEL[sheet.day].date} - ` +
-          meta.halls.map(romanise).join(' / '), 0, meta.height);
-      }
-    }
-
-    if (options.checklist) {
-      await addChecklist(out, plan.day, plan.markers, plan.unplaced);
-    }
+  const marks = new Map();
+  for (const m of sheet.markers) {
+    marks.set(markKey(m.block, m.number), { index: m.index, color: m.color });
   }
-  return out.save();
-}
+  drawPanel(pen, panel, marks, { notes: sheet.notes });
 
-/**
- * Give a copied page its own /Contents array.
- *
- * copyPages hands every copy of the same source page the identical array
- * instance, so without this a marker drawn on one sheet appears on all of them.
- * The content streams themselves stay shared - only the list is new - so this
- * costs nothing.
- */
-function isolateContents(out, page, { PDFArray, PDFRef, PDFName }) {
-  const key = PDFName.of('Contents');
-  const raw = page.node.get(key);
-  let refs;
-  if (raw instanceof PDFArray) {
-    refs = raw.asArray().slice();
-  } else if (raw instanceof PDFRef) {
-    const target = out.context.lookup(raw);
-    refs = target instanceof PDFArray ? target.asArray().slice() : [raw];
-  } else {
-    return;
-  }
-  const fresh = PDFArray.withContext(out.context);
-  for (const ref of refs) fresh.push(ref);
-  page.node.set(key, fresh);
-}
-
-function stampHeader(page, font, rgb, text, left, top) {
-  const size = 9;
-  const width = font.widthOfTextAtSize(text, size);
-  page.drawRectangle({
-    x: left + 12, y: top - 26, width: width + 14, height: 16,
-    color: rgb(1, 1, 1), opacity: 0.9,
-    borderColor: rgb(0.25, 0.25, 0.25), borderWidth: 0.6,
-  });
-  page.drawText(text, {
-    x: left + 19, y: top - 22, size, font, color: rgb(0.1, 0.1, 0.1),
-  });
-}
-
-/**
- * Highlight one space and put its walking number in the aisle beside it, so the
- * printed space number underneath stays readable.
- */
-function drawMarker(page, marker, font, rgb) {
-  const [r, g, b] = marker.rgb;
-  const colour = rgb(r, g, b);
-
-  let badgeX, badgeY;
-  if (marker.rect) {
-    const { x0, y0, x1, y1, block } = marker.rect;
-    page.drawRectangle({
-      x: x0, y: y0, width: x1 - x0, height: y1 - y0,
-      color: colour, opacity: 0.42, borderColor: colour, borderWidth: 0.9,
-    });
-    const rightHalf = x0 > block.x + block.w / 4;
-    badgeX = (rightHalf ? x1 : x0) + (rightHalf ? 1 : -1) * 4.6;
-    badgeY = (y0 + y1) / 2;
-  } else {
-    const { x, y } = marker.point;
-    page.drawLine({
-      start: { x, y }, end: { x, y: y + 11 }, thickness: 1.2, color: colour,
-    });
-    badgeX = x;
-    badgeY = y + 15;
-  }
-
-  page.drawCircle({
-    x: badgeX, y: badgeY, size: 4.4,
-    color: colour, borderColor: rgb(1, 1, 1), borderWidth: 0.7,
-  });
-  const label = String(marker.index);
-  const size = label.length > 2 ? 4.4 : 5.4;
-  page.drawText(label, {
-    x: badgeX - font.widthOfTextAtSize(label, size) / 2,
-    y: badgeY - size * 0.36,
-    size, font, color: rgb(1, 1, 1),
+  const header = `DAY ${day} - ${DAY_LABEL[day].date}`;
+  page.drawText(header, {
+    x: MARGIN, y: size[1] - MARGIN + 2, size: 8,
+    font: fonts.bold, color: rgb(0.45, 0.48, 0.52),
   });
 }
 
 /* ---------------------------------------------------------------- checklist */
 
-const CHECK = {
-  dpi: 2.6,                 // canvas pixels per PDF point
-  margin: 34,
-  rowH: 22,
-  headH: 34,
-  groupH: 22,
-};
+const CHECK = { dpi: 2.6, margin: 34, rowH: 22, headH: 34, groupH: 22 };
 
-async function addChecklist(out, day, markers, unplaced = []) {
+async function addChecklist(doc, day, markers, unplaced, orphans) {
   const groups = [];
-  for (const marker of markers) {
+  for (const m of markers) {
+    const hall = m.placed ? m.hall : `${m.hall}（地図に印なし）`;
     const last = groups.at(-1);
-    if (last && last.hall === marker.hall) last.rows.push(marker);
-    else groups.push({ hall: marker.hall, rows: [marker] });
+    if (last && last.hall === hall) last.rows.push(m);
+    else groups.push({ hall, rows: [m] });
   }
-  if (unplaced.length) {
+  const extra = unplaced.filter(e => !markers.some(m => m.entry.id === e.id));
+  if (extra.length) {
     groups.push({
-      hall: '未定位（地図に印なし・現地確認）',
-      rows: unplaced.map(entry => ({
-        index: null, entry, code: entry.code, rgb: colorOf(entry.color).rgb,
-      })),
+      hall: '未定位（配置を読めませんでした）',
+      rows: extra.map(entry => ({ index: null, entry, code: entry.code,
+                                  color: entry.color })),
     });
   }
   if (!groups.length) return;
 
   const pages = paginate(groups);
-  for (const [i, page] of pages.entries()) {
-    const canvas = paintChecklist(page, day, i + 1, pages.length);
-    const png = await out.embedPng(canvas.toDataURL('image/png'));
-    out.addPage([A4.w, A4.h])
+  for (const [i, rows] of pages.entries()) {
+    const canvas = paintChecklist(rows, day, i + 1, pages.length);
+    const png = await doc.embedPng(canvas.toDataURL('image/png'));
+    doc.addPage([A4.w, A4.h])
       .drawImage(png, { x: 0, y: 0, width: A4.w, height: A4.h });
   }
 }
 
-/** Split hall groups across A4 sheets, repeating a hall heading when it spans. */
 function paginate(groups) {
   const usable = A4.h - CHECK.margin * 2 - CHECK.headH;
   const pages = [[]];
@@ -307,9 +225,7 @@ function paginate(groups) {
       if (used + CHECK.rowH + (fresh ? CHECK.groupH : 0) > usable) {
         pages.push([{ hall: group.hall, rows: [row] }]);
         used = CHECK.groupH + CHECK.rowH;
-        continue;
-      }
-      if (fresh) {
+      } else if (fresh) {
         target.push({ hall: group.hall, rows: [row] });
         used += CHECK.groupH + CHECK.rowH;
       } else {
@@ -339,7 +255,7 @@ function paintChecklist(groups, day, pageNo, pageTotal) {
 
   ctx.fillStyle = '#111';
   ctx.font = font(15, 700);
-  ctx.fillText(`${DAY_LABEL[day].zh}  ${DAY_LABEL[day].date}  巡回清单`, left, y + 13 * k);
+  ctx.fillText(`${DAY_LABEL[day].jp}  ${DAY_LABEL[day].date}  巡回清单`, left, y + 13 * k);
   ctx.font = font(9);
   ctx.fillStyle = '#777';
   ctx.textAlign = 'right';
@@ -360,7 +276,7 @@ function paintChecklist(groups, day, pageNo, pageTotal) {
     y += CHECK.groupH * k;
 
     for (const row of group.rows) {
-      const [r, g, b] = row.rgb;
+      const [r, g, b] = colorOf(row.color).rgb;
       const css = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
 
       ctx.beginPath();
@@ -383,15 +299,14 @@ function paintChecklist(groups, day, pageNo, pageTotal) {
       ctx.font = font(10, 600);
       ctx.fillText(row.code, colCode, y + 9.5 * k);
 
-      const textWidth = colCheck - colName - 22 * k;
+      const width = colCheck - colName - 22 * k;
       ctx.font = font(9.5);
       ctx.fillStyle = '#222';
-      ctx.fillText(clip(ctx, row.entry.name || '—', textWidth), colName, y + 8.5 * k);
-
+      ctx.fillText(clip(ctx, row.entry.name || '—', width), colName, y + 8.5 * k);
       if (row.entry.note) {
         ctx.font = font(8);
         ctx.fillStyle = '#888';
-        ctx.fillText(clip(ctx, row.entry.note, textWidth), colName, y + 18 * k);
+        ctx.fillText(clip(ctx, row.entry.note, width), colName, y + 18 * k);
       }
 
       ctx.strokeStyle = '#999';

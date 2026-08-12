@@ -1,170 +1,149 @@
-/** On-screen map: a pdf.js-rendered page with a marker layer on top. */
+/** On-screen map: one hall panel drawn on a canvas, with clickable spaces. */
 
-import * as pdfjs from '../vendor/pdf.mjs';
+import { allPanels, drawPanel, hitTest, markKey } from './mapdraw.js';
+import { CanvasPen, fit } from './pens.js';
 
-pdfjs.GlobalWorkerOptions.workerSrc =
-  new URL('../vendor/pdf.worker.mjs', import.meta.url).href;
-
-const MIN_SCALE = 0.25;
-const MAX_SCALE = 6;
+const MIN_ZOOM = 0.4;
+const MAX_ZOOM = 8;
 
 export class Viewer extends EventTarget {
-  constructor({ wrap, stage, mapCanvas, markerCanvas }) {
+  constructor({ wrap, stage, canvas, layout }) {
     super();
     this.wrap = wrap;
     this.stage = stage;
-    this.mapCanvas = mapCanvas;
-    this.markerCanvas = markerCanvas;
-    this.scale = 1;
-    this.pageIndex = 0;
-    this.markers = [];
-    this.highlightId = null;
-    this.placing = false;
-    this._renderToken = 0;
+    this.canvas = canvas;
+    this.layout = layout;
+    this.panels = allPanels(layout);
+    this.index = 0;
+    this.zoom = 1;
+    this.marks = new Map();
+    this.notes = [];
 
-    markerCanvas.addEventListener('click', ev => this._onClick(ev));
+    canvas.addEventListener('click', ev => this._onClick(ev));
+    canvas.addEventListener('mousemove', ev => this._onHover(ev));
+    canvas.addEventListener('mouseleave', () => {
+      this.canvas.style.cursor = '';
+      this.dispatchEvent(new CustomEvent('hover', { detail: null }));
+    });
   }
 
-  async open(bytes) {
-    // pdf.js takes ownership of the buffer it is given, so hand it a copy and
-    // keep ours for the exporter.
-    this.pdf = await pdfjs.getDocument({ data: bytes.slice() }).promise;
-    return this.pdf.numPages;
+  get panel() { return this.panels[this.index]; }
+
+  show(index) {
+    this.index = Math.max(0, Math.min(this.panels.length - 1, index));
+    this.render();
   }
 
-  async show(pageIndex, scale = this.scale) {
-    this.pageIndex = pageIndex;
-    this.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
-    const token = ++this._renderToken;
+  /** Jump to the panel holding a hall on a page. */
+  showHall(pageIndex, hall) {
+    const i = this.panels.findIndex(p => p.pageIndex === pageIndex && p.hall === hall);
+    if (i >= 0 && i !== this.index) this.show(i);
+    return i >= 0;
+  }
 
-    const page = await this.pdf.getPage(pageIndex + 1);
-    if (token !== this._renderToken) return;
+  setMarks(marks, notes = []) {
+    this.marks = marks;
+    this.notes = notes;
+    this.render();
+  }
 
+  setZoom(z) {
+    this.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
+    this.render();
+  }
+
+  zoomBy(f) { this.setZoom(this.zoom * f); }
+
+  fitWidth() {
+    this.zoom = 1;
+    this.render();
+  }
+
+  /** The source box including room for the panel title. */
+  drawBox() {
+    const { box, header } = this.panel;
+    return { x: box.x, y: box.y, w: box.w, h: box.h + header };
+  }
+
+  render() {
+    const panel = this.panel;
+    if (!panel) return;
+    const box = this.drawBox();
+
+    const avail = Math.max(320, this.wrap.clientWidth - 40);
+    const base = avail / box.w;
+    const s = base * this.zoom;
+    const cssW = Math.round(box.w * s);
+    const cssH = Math.round(box.h * s);
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    this.viewport = page.getViewport({ scale: this.scale * dpr });
-    const cssW = this.viewport.width / dpr;
-    const cssH = this.viewport.height / dpr;
 
-    for (const canvas of [this.mapCanvas, this.markerCanvas]) {
-      canvas.width = Math.round(this.viewport.width);
-      canvas.height = Math.round(this.viewport.height);
-      canvas.style.width = `${cssW}px`;
-      canvas.style.height = `${cssH}px`;
-    }
+    this.canvas.width = Math.round(cssW * dpr);
+    this.canvas.height = Math.round(cssH * dpr);
+    this.canvas.style.width = `${cssW}px`;
+    this.canvas.style.height = `${cssH}px`;
     this.stage.style.width = `${cssW}px`;
     this.stage.style.height = `${cssH}px`;
+
+    const ctx = this.canvas.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+    this.transform = fit(box, { x: 0, y: 0, w: cssW, h: cssH });
     this.dpr = dpr;
+    const pen = new CanvasPen(ctx, this.transform, dpr);
+    drawPanel(pen, panel, this.marks, { notes: this.notes });
 
-    const ctx = this.mapCanvas.getContext('2d');
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(0, 0, this.mapCanvas.width, this.mapCanvas.height);
-    await page.render({ canvasContext: ctx, viewport: this.viewport }).promise;
-    if (token !== this._renderToken) return;
-
-    this.drawMarkers(this.markers);
+    this.scale = s;
     this.dispatchEvent(new Event('render'));
   }
 
-  fitWidth() {
-    if (!this.viewport) return;
-    const avail = this.wrap.clientWidth - 48;
-    const natural = this.viewport.width / (this.scale * this.dpr);
-    return this.show(this.pageIndex, avail / natural);
+  /** Canvas pixel position -> source PDF coordinates. */
+  toSource(ev) {
+    const r = this.canvas.getBoundingClientRect();
+    const t = this.transform;
+    const cx = ev.clientX - r.left;
+    const cy = ev.clientY - r.top;
+    return {
+      x: t.box.x + (cx - t.ox) / t.s,
+      y: t.box.y + t.box.h - (cy - t.oy) / t.s,
+    };
   }
 
-  zoomBy(factor) {
-    return this.show(this.pageIndex, this.scale * factor);
-  }
-
-  setPlacing(on) {
-    this.placing = on;
-    this.wrap.classList.toggle('placing', on);
-  }
-
-  /** @param {Array<{rect?, point?, css: string, index: number, active: boolean}>} markers */
-  drawMarkers(markers) {
-    this.markers = markers;
-    const canvas = this.markerCanvas;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (!this.viewport) return;
-
-    const k = this.dpr;
-    ctx.lineJoin = 'round';
-
-    for (const marker of markers) {
-      const box = marker.rect ? this._box(marker.rect) : null;
-      if (box) {
-        ctx.fillStyle = marker.css;
-        ctx.globalAlpha = marker.active ? 0.55 : 0.34;
-        ctx.fillRect(box.x, box.y, box.w, box.h);
-        ctx.globalAlpha = 1;
-        ctx.strokeStyle = marker.css;
-        ctx.lineWidth = (marker.active ? 2.6 : 1.6) * k;
-        ctx.strokeRect(box.x, box.y, box.w, box.h);
-      }
-
-      const [cx, cy] = marker.point
-        ? this.viewport.convertToViewportPoint(marker.point.x, marker.point.y)
-        : [box.x + box.w, box.y];
-
-      if (marker.point) {
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(cx - 6 * k, cy - 14 * k);
-        ctx.lineTo(cx + 6 * k, cy - 14 * k);
-        ctx.closePath();
-        ctx.fillStyle = marker.css;
-        ctx.fill();
-      }
-
-      const r = (marker.active ? 11 : 9) * k;
-      const bx = marker.point ? cx : cx + r * 0.2;
-      const by = marker.point ? cy - 14 * k - r * 0.6 : cy - r * 0.2;
-      ctx.beginPath();
-      ctx.arc(bx, by, r, 0, Math.PI * 2);
-      ctx.fillStyle = marker.css;
-      ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1.6 * k;
-      ctx.stroke();
-
-      ctx.fillStyle = '#fff';
-      ctx.font = `700 ${Math.round(r * 1.15)}px system-ui, sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(String(marker.index), bx, by + 0.5 * k);
-    }
-  }
-
-  /** Scroll a marker into the middle of the viewport. */
-  focus(marker) {
-    if (!this.viewport) return;
-    const [x, y] = marker.rect
-      ? this.viewport.convertToViewportPoint(
-          (marker.rect.x0 + marker.rect.x1) / 2, (marker.rect.y0 + marker.rect.y1) / 2)
-      : this.viewport.convertToViewportPoint(marker.point.x, marker.point.y);
+  /** Scroll a marked space into the middle of the viewport. */
+  focus(block, number) {
+    const panel = this.panel;
+    const b = panel.blocks.find(v => v.block === block);
+    if (!b || !this.transform) return;
+    const t = this.transform;
+    const rows = b.rows;
+    const half = b.count / 2;
+    const row = number <= half ? number - 1 : b.count - number;
+    const [y0, y1] = rows[Math.max(0, Math.min(rows.length - 1, row))];
+    const cx = t.ox + (b.x + b.w / 2 - t.box.x) * t.s;
+    const cy = t.oy + (t.box.h - ((y0 + y1) / 2 - t.box.y)) * t.s;
     this.wrap.scrollTo({
-      left: x / this.dpr + this.stage.offsetLeft - this.wrap.clientWidth / 2,
-      top: y / this.dpr + this.stage.offsetTop - this.wrap.clientHeight / 2,
+      left: cx + this.stage.offsetLeft - this.wrap.clientWidth / 2,
+      top: cy + this.stage.offsetTop - this.wrap.clientHeight / 2,
       behavior: 'smooth',
     });
   }
 
-  _box(rect) {
-    const [x0, y1] = this.viewport.convertToViewportPoint(rect.x0, rect.y1);
-    const [x1, y0] = this.viewport.convertToViewportPoint(rect.x1, rect.y0);
-    return { x: x0, y: y1, w: x1 - x0, h: y0 - y1 };
+  _onClick(ev) {
+    const p = this.toSource(ev);
+    const hit = hitTest(this.panel, p.x, p.y);
+    if (hit) {
+      this.dispatchEvent(new CustomEvent('cellclick', { detail: hit }));
+    }
   }
 
-  _onClick(ev) {
-    if (!this.viewport) return;
-    const rect = this.markerCanvas.getBoundingClientRect();
-    const vx = (ev.clientX - rect.left) * this.dpr;
-    const vy = (ev.clientY - rect.top) * this.dpr;
-    const [x, y] = this.viewport.convertToPdfPoint(vx, vy);
-    this.dispatchEvent(new CustomEvent('mapclick', {
-      detail: { page: this.pageIndex, x, y },
-    }));
+  _onHover(ev) {
+    const p = this.toSource(ev);
+    const hit = hitTest(this.panel, p.x, p.y);
+    this.canvas.style.cursor = hit ? 'pointer' : '';
+    const key = hit ? markKey(hit.block, hit.number) : null;
+    if (key !== this._hoverKey) {
+      this._hoverKey = key;
+      this.dispatchEvent(new CustomEvent('hover', { detail: hit }));
+    }
   }
 }
