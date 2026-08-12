@@ -228,9 +228,11 @@ main {
 .zoom button { padding: 4px 10px; }
 #zoom-level { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; min-width: 42px; text-align: center; }
 
-.canvas-wrap { flex: 1; overflow: auto; position: relative; background: var(--bg); }
+.canvas-wrap { flex: 1; overflow: auto; position: relative; background: #8b9099; }
 .stage { position: relative; margin: 16px auto; width: max-content; }
-.stage canvas { display: block; background: #fff; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
+.stage canvas { display: block; }
+#map-canvas { background: #fff; box-shadow: var(--shadow); }
+#marker-canvas { position: absolute; inset: 0; }
 
 .hover-status {
   min-width: 96px;

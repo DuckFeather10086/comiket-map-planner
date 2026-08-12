@@ -1,20 +1,22 @@
 /**
- * PDF output: the map is drawn, not borrowed.
+ * PDF output: the official hall map with the wishlist stamped onto it.
  *
- * Every sheet comes out of the same `mapdraw` routine that paints the screen, so
- * what you print is what you saw.  Sheets are all vector: the space grid and
- * markers as shapes, kana block letters and hall names through a 9 kB font
- * subset holding only those glyphs, everything ASCII through the built-in
- * Helvetica.  The checklist needs arbitrary Japanese for circle names, so it
- * pulls in a JIS X 0208 level-1 face, but only when a checklist is printed.
+ * Map sheets come out of one copyPages() call so pdf-lib shares a single copy
+ * of the artwork between them and keeps its original compressed streams; each
+ * sheet then gets its own content array so markers do not bleed across sheets,
+ * and a per-hall zoom sheet is the same page again with its boxes cropped.
+ * Re-embedding the page per sheet instead would decompress the artwork and
+ * inflate the file by about 45%.
+ *
+ * Markers are vector shapes over the printed cells.  The checklist is set with
+ * a JIS X 0208 level-1 face, fetched only when one is actually printed.
  */
 
 import { colorOf } from './layout.js';
-import { allPanels, commonScale, drawPanel, markKey, panelBox } from './mapdraw.js';
-import { PdfPen, fit, splitRuns } from './pens.js';
+import { cellRect, hallPanel, wallCellRect } from './mapdraw.js';
+import { splitRuns } from './pens.js';
 
 const A4 = { w: 595.28, h: 841.89 };
-const MARGIN = 22;
 
 let libPromise;
 
@@ -24,29 +26,9 @@ function loadLibs() {
       inject(new URL('../vendor/pdf-lib.min.js', import.meta.url).href),
       inject(new URL('../vendor/fontkit.umd.min.js', import.meta.url).href),
     ]);
-    const font = await fetch(new URL('../vendor/kana-subset.ttf', import.meta.url))
-      .then(r => r.arrayBuffer());
-    return { lib: window.PDFLib, fontkit: window.fontkit, cjkFont: font };
+    return { lib: window.PDFLib, fontkit: window.fontkit };
   })();
   return libPromise;
-}
-
-let jisPromise;
-
-/**
- * The checklist sets arbitrary circle names, so it needs real Japanese
- * coverage: JIS X 0208 level 1, which is what ordinary Japanese text uses.
- * Fetched only when a checklist is actually being printed.
- *
- * It goes in whole rather than subset because pdf-lib's TrueType subsetter
- * silently drops glyphs from CJK fonts past about 30 kB - the text layer comes
- * out right and the page renders blank - so the font is embedded as-is and
- * costs roughly 300 kB in the output.
- */
-function loadJisFont() {
-  jisPromise ??= fetch(new URL('../vendor/jis-level1.ttf', import.meta.url))
-    .then(r => r.arrayBuffer());
-  return jisPromise;
 }
 
 function inject(src) {
@@ -59,12 +41,43 @@ function inject(src) {
   });
 }
 
+let jisPromise;
+
+/**
+ * The checklist sets arbitrary circle names, so it needs real Japanese
+ * coverage: JIS X 0208 level 1, which is what ordinary Japanese text uses.
+ *
+ * It goes in whole rather than subset because pdf-lib's TrueType subsetter
+ * silently drops glyphs from CJK fonts past about 30 kB - the text layer comes
+ * out right and the page renders blank - so it costs roughly 300 kB, and is
+ * fetched only when a checklist is printed.
+ */
+function loadJisFont() {
+  jisPromise ??= fetch(new URL('../vendor/jis-level1.ttf', import.meta.url))
+    .then(r => r.arrayBuffer());
+  return jisPromise;
+}
+
 const DAY_LABEL = {
   1: { jp: '1日目', date: '2026-08-15 Sat' },
   2: { jp: '2日目', date: '2026-08-16 Sun' },
 };
 
+const ROMAJI = { 東: 'East', 西: 'West', 南: 'South' };
+const romanise = hall => hall.replace(/[東西南]/g, m => ROMAJI[m] + ' ').trim();
+
 /* ------------------------------------------------------------------ planning */
+
+/** Where a resolved code sits on its page, in map points. */
+export function markerRect(layout, r) {
+  if (!r.ok) return null;
+  if (r.wall) {
+    const panel = hallPanel(layout, r.page, r.hall);
+    return panel ? wallCellRect(panel, r.run, r.number) : null;
+  }
+  const block = layout.blocks.get(r.block);
+  return cellRect(block, r.number);
+}
 
 /** Markers for one day, numbered in walking order. */
 export function planMarkers(layout, entries) {
@@ -89,6 +102,8 @@ export function planMarkers(layout, entries) {
     block: m.r.block,
     number: m.r.number,
     placed: m.r.ok,
+    approx: Boolean(m.r.approx),
+    rect: markerRect(layout, m.r),
     code: m.r.ok ? m.r.canonical : `${m.r.hall}${m.r.block}-${m.r.number}${m.r.sub}`,
   }));
 }
@@ -97,39 +112,17 @@ function sortKey(layout, m) {
   if (!m.r.ok) return [m.r.page ?? 9, 99, 9e9, m.r.number ?? 9e9];
   const page = layout.page(m.r.page);
   const hall = page.halls.indexOf(m.r.hall);
-  // walls first within a hall: that is the queue you join before working the
-  // islands, and it keeps the numbering in walking order
+  // walls first within a hall: that is the queue you join before the islands
   if (m.r.wall) return [m.r.page, hall, -1, m.r.number];
   return [m.r.page, hall, m.r.rect.block.x, m.r.number];
 }
 
-/** Group a day's markers by the panel they belong to. */
-export function groupByPanel(layout, markers) {
-  const panels = allPanels(layout);
-  const byHall = new Map();
-  for (const m of markers) {
-    const key = `${m.page}/${m.hall}`;
-    if (!byHall.has(key)) byHall.set(key, []);
-    byHall.get(key).push(m);
-  }
-  const out = [];
-  for (const panel of panels) {
-    const placed = byHall.get(`${panel.pageIndex}/${panel.hall}`) || [];
-    // a wall block runs around all the halls on its page, so its note goes on
-    // each of that page's sheets rather than one named hall
-    const notes = markers.filter(m => !m.placed && m.page === panel.pageIndex);
-    if (placed.length || notes.length) out.push({ panel, markers: placed, notes });
-  }
-  const orphans = markers.filter(
-    m => !m.placed && !panels.some(p => p.pageIndex === m.page));
-  return { sheets: out, orphans };
-}
-
 /* -------------------------------------------------------------------- output */
 
-export async function buildPdf({ layout, store, days, options }) {
-  const { lib, fontkit, cjkFont } = await loadLibs();
-  const { PDFDocument, StandardFonts, rgb } = lib;
+export async function buildPdf({ mapBytes, layout, store, days, options }) {
+  const { lib, fontkit } = await loadLibs();
+  const { PDFDocument, StandardFonts, rgb, PDFArray, PDFRef, PDFName } = lib;
+  const source = await PDFDocument.load(mapBytes);
 
   const jobs = options.splitDays
     ? days.map(day => ({ days: [day], suffix: DAY_LABEL[day].jp }))
@@ -139,70 +132,156 @@ export async function buildPdf({ layout, store, days, options }) {
   for (const job of jobs) {
     const plans = job.days
       .map(day => ({ day, entries: store.forDay(day) }))
-      .filter(p => p.entries.length);
+      .filter(p => p.entries.length)
+      .map(p => ({ ...p, markers: planMarkers(layout, p.entries) }));
     if (!plans.length) continue;
 
-    const doc = await PDFDocument.create();
-    doc.registerFontkit(fontkit);
-    doc.setTitle(`${layout.event} 巡回地図`);
-    doc.setCreator('comiket-map-planner');
+    const out = await PDFDocument.create();
+    out.registerFontkit(fontkit);
+    out.setTitle(`${layout.event} 巡回地図`);
+    out.setCreator('comiket-map-planner');
     const fonts = {
-      latin: await doc.embedFont(StandardFonts.Helvetica),
-      bold: await doc.embedFont(StandardFonts.HelveticaBold),
-      cjk: await doc.embedFont(cjkFont, { subset: false }),
+      latin: await out.embedFont(StandardFonts.Helvetica),
+      bold: await out.embedFont(StandardFonts.HelveticaBold),
     };
 
+    // sheets planned up front: pdf-lib caches copied objects per copyPages call,
+    // so one call keeps a single copy of the artwork for the whole document
+    const sheets = [];
     for (const plan of plans) {
-      const markers = planMarkers(layout, plan.entries);
-      const { sheets, orphans } = groupByPanel(layout, markers);
+      const byPage = new Map();
+      for (const m of plan.markers) {
+        if (!m.placed) continue;
+        if (!byPage.has(m.page)) byPage.set(m.page, []);
+        byPage.get(m.page).push(m);
+      }
+      for (const pageIndex of [...byPage.keys()].sort((a, b) => a - b)) {
+        const pageMarkers = byPage.get(pageIndex);
+        sheets.push({ plan, pageIndex, markers: pageMarkers, hall: null });
+        if (!options.zoomPages) continue;
+        for (const hall of new Set(pageMarkers.map(m => m.hall))) {
+          const panel = hallPanel(layout, pageIndex, hall);
+          if (panel) sheets.push({ plan, pageIndex, markers: pageMarkers, hall, panel });
+        }
+      }
+    }
 
-      // every sheet at one scale, so the halls print at their true relative size
-      const scale = commonScale(allPanels(layout),
-        { w: A4.h - MARGIN * 2, h: A4.h - MARGIN * 2 - 14 });
-      for (const sheet of sheets) {
-        drawSheet({ doc, rgb, fonts, sheet, day: plan.day, scale });
+    const copied = sheets.length
+      ? await out.copyPages(source, sheets.map(s => s.pageIndex))
+      : [];
+
+    let cursor = 0;
+    for (const plan of plans) {
+      for (const sheet of sheets.filter(s => s.plan === plan)) {
+        const page = copied[cursor++];
+        out.addPage(page);
+        isolateContents(out, page, { PDFArray, PDFRef, PDFName });
+        drawSheet({ layout, page, sheet, fonts, rgb });
       }
       if (options.checklist) {
-        fonts.jp ??= await doc.embedFont(await loadJisFont(), { subset: false });
-        const placed = new Set(markers.map(m => m.entry.id));
-        await addChecklist(doc, plan.day, markers,
+        fonts.jp ??= await out.embedFont(await loadJisFont(), { subset: false });
+        const placed = new Set(plan.markers.map(m => m.entry.id));
+        await addChecklist(out, plan.day, plan.markers,
                            plan.entries.filter(e => !placed.has(e.id)), fonts, rgb);
       }
     }
 
     outputs.push({
       name: `${layout.event}_${job.suffix}_巡回地図.pdf`,
-      bytes: await doc.save(),
+      bytes: await out.save(),
     });
   }
   return outputs;
 }
 
-function drawSheet({ doc, rgb, fonts, sheet, day, scale }) {
-  const { panel } = sheet;
-  const box = panelBox(panel);
-  // whichever orientation holds this hall at the shared scale
-  const drawn = { w: box.w * scale, h: box.h * scale };
-  const landscape = drawn.w > A4.w - MARGIN * 2 || drawn.w / drawn.h >= 1;
-  const size = landscape ? [A4.h, A4.w] : [A4.w, A4.h];
-  const page = doc.addPage(size);
-
-  const target = {
-    x: MARGIN, y: MARGIN,
-    w: size[0] - MARGIN * 2, h: size[1] - MARGIN * 2 - 14,
-  };
-  const pen = new PdfPen(page, fit(box, target, scale), fonts, rgb);
-
-  const marks = new Map();
-  for (const m of sheet.markers) {
-    marks.set(markKey(m.block, m.number), { index: m.index, color: m.color });
+/**
+ * Give a copied page its own /Contents array.
+ *
+ * copyPages hands every copy of one source page the same array instance, so
+ * without this a marker drawn on one sheet appears on all of them.  The content
+ * streams stay shared - only the list is new - so it costs nothing.
+ */
+function isolateContents(out, page, { PDFArray, PDFRef, PDFName }) {
+  const key = PDFName.of('Contents');
+  const raw = page.node.get(key);
+  let refs;
+  if (raw instanceof PDFArray) {
+    refs = raw.asArray().slice();
+  } else if (raw instanceof PDFRef) {
+    const target = out.context.lookup(raw);
+    refs = target instanceof PDFArray ? target.asArray().slice() : [raw];
+  } else {
+    return;
   }
-  drawPanel(pen, panel, marks, { notes: sheet.notes });
+  const fresh = PDFArray.withContext(out.context);
+  for (const ref of refs) fresh.push(ref);
+  page.node.set(key, fresh);
+}
 
-  const header = `DAY ${day} - ${DAY_LABEL[day].date}`;
-  page.drawText(header, {
-    x: MARGIN, y: size[1] - MARGIN + 2, size: 8,
-    font: fonts.bold, color: rgb(0.45, 0.48, 0.52),
+function drawSheet({ layout, page, sheet, fonts, rgb }) {
+  for (const marker of sheet.markers) {
+    if (sheet.hall && marker.hall !== sheet.hall) continue;
+    drawMarker(page, marker, fonts.bold, rgb);
+  }
+
+  const meta = layout.page(sheet.pageIndex);
+  if (sheet.hall) {
+    const { box } = sheet.panel;
+    const w = box.w, h = box.h + sheet.panel.header;
+    page.setMediaBox(box.x, box.y, w, h);
+    page.setCropBox(box.x, box.y, w, h);
+    page.setBleedBox(box.x, box.y, w, h);
+    page.setTrimBox(box.x, box.y, w, h);
+    stamp(page, fonts.bold, rgb,
+          `DAY ${sheet.plan.day} - ${romanise(sheet.hall)}`, box.x, box.y + h);
+  } else {
+    stamp(page, fonts.bold, rgb,
+          `DAY ${sheet.plan.day} - ${DAY_LABEL[sheet.plan.day].date} - `
+          + meta.halls.map(romanise).join(' / '), 0, meta.height);
+  }
+}
+
+function stamp(page, font, rgb, text, left, top) {
+  const size = 9;
+  const width = font.widthOfTextAtSize(text, size);
+  page.drawRectangle({
+    x: left + 12, y: top - 26, width: width + 14, height: 16,
+    color: rgb(1, 1, 1), opacity: 0.9,
+    borderColor: rgb(0.25, 0.25, 0.25), borderWidth: 0.6,
+  });
+  page.drawText(text, {
+    x: left + 19, y: top - 22, size, font, color: rgb(0.1, 0.1, 0.1),
+  });
+}
+
+/**
+ * Highlight one space and put its walking number in the aisle beside it, so the
+ * printed space number underneath stays readable.  Wall spaces are drawn dashed
+ * because their position along the wall is laid out evenly rather than measured.
+ */
+function drawMarker(page, marker, font, rgb) {
+  const { rect } = marker;
+  if (!rect) return;
+  const [r, g, b] = colorOf(marker.color).rgb;
+  const colour = rgb(r, g, b);
+
+  page.drawRectangle({
+    x: rect.x, y: rect.y, width: rect.w, height: rect.h,
+    color: colour, opacity: marker.approx ? 0.22 : 0.42,
+    borderColor: colour, borderWidth: 0.9,
+    ...(marker.approx ? { borderDashArray: [1.6, 1.2] } : null),
+  });
+
+  const badgeX = rect.x + rect.w + 4.6;
+  const badgeY = rect.y + rect.h / 2;
+  page.drawCircle({ x: badgeX, y: badgeY, size: 4.4, color: colour,
+                    borderColor: rgb(1, 1, 1), borderWidth: 0.7 });
+  const label = String(marker.index);
+  const size = label.length > 2 ? 4.4 : 5.4;
+  page.drawText(label, {
+    x: badgeX - font.widthOfTextAtSize(label, size) / 2,
+    y: badgeY - size * 0.36,
+    size, font, color: rgb(1, 1, 1),
   });
 }
 

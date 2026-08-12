@@ -3,6 +3,7 @@ import { Store, parsePaste } from './store.js';
 import { Viewer } from './viewer.js';
 import { buildPdf, planMarkers } from './exporter.js';
 import { markKey } from './mapdraw.js';
+import { loadMap } from './pdfsource.js';
 
 const LAYOUT_URL = 'data/C108.json';
 const $ = id => document.getElementById(id);
@@ -14,10 +15,11 @@ const ui = {
   form: $('add-form'), code: $('in-code'), name: $('in-name'),
   note: $('in-note'), color: $('in-color'), hint: $('code-hint'),
   wrap: $('canvas-wrap'), stage: $('stage'), canvas: $('map-canvas'),
+  markerCanvas: $('marker-canvas'),
   zoomLevel: $('zoom-level'), status: $('hover-status'),
 };
 
-let layout, store, viewer;
+let layout, store, viewer, mapBytes;
 let editingId = null;
 let activeId = null;
 
@@ -32,33 +34,41 @@ async function boot() {
   $('event-name').textContent = layout.event;
   for (const c of PALETTE) ui.color.append(new Option(c.label, c.key));
 
+  ui.loaderText.textContent = '加载会场地图…';
+  const { bytes, verified } = await loadMap(layout.doc);
+  mapBytes = bytes;
+  if (!verified) console.warn('map file differs from the one the layout was measured against');
+
   viewer = new Viewer({
-    wrap: ui.wrap, stage: ui.stage, canvas: ui.canvas, layout,
+    wrap: ui.wrap, stage: ui.stage, mapCanvas: ui.canvas,
+    markerCanvas: ui.markerCanvas, layout,
   });
+  await viewer.open(mapBytes);
   viewer.addEventListener('cellclick', ev => onCellClick(ev.detail));
   viewer.addEventListener('hover', ev => onHover(ev.detail));
   viewer.addEventListener('render', () => {
-    ui.zoomLevel.textContent = `${Math.round(viewer.zoom * 100)}%`;
+    ui.zoomLevel.textContent = `${Math.round(viewer.scale * 100)}%`;
   });
 
-  buildHallTabs();
+  buildPageTabs();
   wireUi();
   store.addEventListener('change', render);
-  viewer.show(0);
+  await viewer.show(0);
+  await viewer.fitWidth();
   render();
   ui.loader.hidden = true;
 }
 
 /* --------------------------------------------------------------------- chrome */
 
-function buildHallTabs() {
+function buildPageTabs() {
   ui.hallTabs.innerHTML = '';
-  viewer.panels.forEach((panel, index) => {
+  layout.pages.forEach((page, index) => {
     const button = document.createElement('button');
-    button.dataset.panel = index;
-    button.innerHTML = `${panel.hall}<span class="n" hidden>0</span>`;
-    button.addEventListener('click', () => {
-      viewer.show(index);
+    button.dataset.page = index;
+    button.innerHTML = `${page.halls.join('・')}<span class="n" hidden>0</span>`;
+    button.addEventListener('click', async () => {
+      await viewer.show(index);
       render();
     });
     ui.hallTabs.append(button);
@@ -100,10 +110,9 @@ function wireUi() {
 
   ui.code.addEventListener('input', updateHint);
 
-  $('zoom-in').addEventListener('click', () => viewer.zoomBy(1.3));
-  $('zoom-out').addEventListener('click', () => viewer.zoomBy(1 / 1.3));
+  $('zoom-in').addEventListener('click', () => viewer.zoomBy(1.25));
+  $('zoom-out').addEventListener('click', () => viewer.zoomBy(0.8));
   $('zoom-fit').addEventListener('click', () => viewer.fitWidth());
-  window.addEventListener('resize', () => viewer.render());
 
   $('btn-sort').addEventListener('click', () => {
     const order = new Map(planMarkers(layout, store.forDay())
@@ -128,10 +137,12 @@ function updateHint() {
   const r = layout.resolve(value);
   if (r.ok) {
     ui.hint.className = 'hint';
-    ui.hint.textContent = `✓ ${r.hall} ${r.block}ブロック ${r.number}${r.sub}`;
+    ui.hint.textContent = r.approx
+      ? `✓ ${r.hall} 壁 ${r.block}-${r.number}${r.sub}（沿墙位置为近似）`
+      : `✓ ${r.hall} ${r.block}ブロック ${r.number}${r.sub}`;
   } else if (r.reason === 'wall') {
     ui.hint.className = 'hint';
-    ui.hint.textContent = `${r.hall} — 壁区没有网格坐标，会列在图边和清单上`;
+    ui.hint.textContent = `${r.hall} — 该号段还没读，会列在清单的「未定位」里`;
   } else if (r.reason === 'number') {
     ui.hint.className = 'hint bad';
     ui.hint.textContent = `${r.block} 区只有 1–${r.max} 号`;
@@ -155,34 +166,19 @@ function render() {
 
   const counts = new Map();
   for (const m of markers) {
-    const key = `${m.page}/${m.hall}`;
-    counts.set(key, (counts.get(key) || 0) + 1);
+    if (m.placed) counts.set(m.page, (counts.get(m.page) || 0) + 1);
   }
   for (const button of ui.hallTabs.children) {
-    const panel = viewer.panels[Number(button.dataset.panel)];
-    button.setAttribute('aria-pressed',
-      String(Number(button.dataset.panel) === viewer.index));
-    const n = [...counts].reduce((sum, [key, c]) => {
-      const [page, hall] = key.split('/');
-      return sum + (Number(page) === panel.pageIndex && hall.startsWith(panel.hall) ? c : 0);
-    }, 0);
+    const index = Number(button.dataset.page);
+    button.setAttribute('aria-pressed', String(index === viewer.pageIndex));
     const badge = button.querySelector('.n');
-    badge.textContent = n;
-    badge.hidden = n === 0;
+    badge.textContent = counts.get(index) || 0;
+    badge.hidden = !counts.get(index);
   }
 
-  const marks = new Map();
-  for (const m of markers) {
-    if (m.placed) {
-      marks.set(markKey(m.block, m.number),
-                { index: m.index, color: m.color, id: m.entry.id });
-    }
-  }
-  // wall blocks run around a whole page's halls, so their notes belong on every
-  // panel of that page rather than one named hall
-  const panel = viewer.panel;
-  const notes = markers.filter(m => !m.placed && m.page === panel.pageIndex);
-  viewer.setMarks(marks, notes);
+  viewer.drawMarkers(markers
+    .filter(m => m.placed && m.page === viewer.pageIndex && m.rect)
+    .map(m => ({ ...m, active: m.entry.id === activeId })));
 
   renderList(entries, byEntry);
 }
@@ -248,12 +244,12 @@ function renderRow(entry, marker) {
   );
 
   li.append(badge, body, tools);
-  li.addEventListener('click', () => {
+  li.addEventListener('click', async () => {
     activeId = entry.id;
     if (marker && marker.placed) {
-      if (!viewer.showHall(marker.page, marker.hall)) return;
+      if (marker.page !== viewer.pageIndex) await viewer.show(marker.page);
       render();
-      viewer.focus(marker.block, marker.number);
+      viewer.focus(marker);
       return;
     }
     render();
@@ -344,8 +340,9 @@ function wireExport() {
     button.textContent = '生成中…';
     try {
       const files = await buildPdf({
-        layout, store, days,
+        mapBytes, layout, store, days,
         options: {
+          zoomPages: $('opt-zoom').checked,
           checklist: $('opt-list').checked,
           splitDays: $('opt-split').checked,
         },

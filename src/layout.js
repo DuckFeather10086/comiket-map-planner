@@ -154,7 +154,7 @@ export class Layout {
       const run = this.wallRun(parsed.block, parsed.number);
       if (run) {
         return {
-          ok: true, wall: true, run, ...parsed,
+          ok: true, wall: true, run, approx: true, ...parsed,
           hall: run.hall, page: run.page,
           canonical: `${run.hall}${parsed.block}-`
                      + `${String(parsed.number).padStart(2, '0')}${parsed.sub}`,

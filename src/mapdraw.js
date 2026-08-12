@@ -1,31 +1,17 @@
 /**
- * The map itself, drawn from the extracted space rectangles.
+ * Where every space sits on the official map.
  *
- * There is no traced artwork here: every space in `data/*.json` already carries
- * its rectangle in PDF points, which is all a hall map really is - position plus
- * number.  One routine emits the drawing through an abstract pen so the screen
- * canvas and the exported PDF cannot drift apart, and the same geometry answers
- * hit-tests when a cell is clicked.
+ * `data/*.json` carries the PDF-space rectangle of each island row, which is
+ * all the marker layer and the click targets need.  Wall spaces have no regular
+ * grid to extract, so their declared runs are laid evenly along the hall edge -
+ * right wall, right order, right number, with the position along the wall good
+ * to a cell or two.
  */
 
-import { colorOf } from './layout.js';
-
-/** Ink and paper, kept in one place so both backends agree. */
-export const THEME = {
-  paper: [1, 1, 1],
-  frame: [0.78, 0.81, 0.85],
-  wall: [0.28, 0.32, 0.38],
-  opening: [0.80, 0.84, 0.88],
-  islandEdge: [0.62, 0.66, 0.72],
-  cellEdge: [0.80, 0.83, 0.87],
-  number: [0.25, 0.30, 0.36],
-  letter: [0.08, 0.10, 0.13],
-  hall: [0.10, 0.12, 0.16],
-  dim: [0.55, 0.60, 0.66],
-};
-
-const PAD = 30;          // points of breathing room, enough to show the walls
-const HEADER = 34;       // strip above the map for the hall name and notes
+const PAD = 30;          // breathing room around a hall, used by the zoom sheets
+const HEADER = 34;       // strip above a zoom sheet for its title
+const WALL_T = 8;        // how deep a wall cell reaches into the hall
+const WALL_GAP = 2;      // clearance between the wall strip and the hall edge
 
 /**
  * Geometry of one hall panel: the blocks it contains and the box they occupy.
@@ -52,30 +38,6 @@ export function hallPanel(layout, pageIndex, hall) {
   return { hall, pageIndex, blocks, box, runs, wallLines, header: HEADER };
 }
 
-/**
- * The drawing box of a panel, including the strip above it for the title.
- * Sizes are real map points, so panels stay comparable with one another.
- */
-export function panelBox(panel) {
-  const { box, header } = panel;
-  return { x: box.x, y: box.y, w: box.w, h: box.h + header };
-}
-
-/**
- * The largest panel on the event.  Everything is drawn at the scale that makes
- * this one fit, so a small hall comes out small instead of being blown up to
- * fill its sheet - the halls are not the same size and the map should not
- * pretend they are.
- */
-export function commonScale(panels, target) {
-  let s = Infinity;
-  for (const panel of panels) {
-    const box = panelBox(panel);
-    s = Math.min(s, target.w / box.w, target.h / box.h);
-  }
-  return s;
-}
-
 /** Every hall on the event, in map order. */
 export function allPanels(layout) {
   const out = [];
@@ -87,27 +49,6 @@ export function allPanels(layout) {
   });
   return out;
 }
-
-/** The contiguous vertical runs of a block's rows, i.e. its island sections. */
-export function sections(block) {
-  const runs = [];
-  let cur = [block.rows[0]];
-  for (let i = 1; i < block.rows.length; i++) {
-    const [y0] = block.rows[i];
-    const prevTop = cur[cur.length - 1][1];
-    if (y0 - prevTop > 1.2) {
-      runs.push(cur);
-      cur = [block.rows[i]];
-    } else {
-      cur.push(block.rows[i]);
-    }
-  }
-  runs.push(cur);
-  return runs;
-}
-
-const WALL_T = 8;        // how deep a wall cell reaches into the hall
-const WALL_GAP = 2;      // clearance between the wall strip and the hall edge
 
 /** The spaces a wall run actually has, skipping numbers that are not sold. */
 export function runNumbers(run) {
@@ -165,17 +106,16 @@ export function cellRect(block, number) {
   return { x, y: y0, w: hw, h: y1 - y0 };
 }
 
-/** Which space a point lands on, or null. Used for click-to-mark. */
-export function hitTest(panel, px, py) {
-  for (const run of panel.runs || []) {
-    for (const n of runNumbers(run)) {
-      const r = wallCellRect(panel, run, n);
-      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
-        return { block: run.block, hall: run.hall, number: n, wall: true };
-      }
-    }
-  }
-  for (const block of panel.blocks) {
+/**
+ * Which space a point on a map page lands on, or null.
+ *
+ * Islands are exact.  Wall runs are laid evenly along the hall edge because the
+ * printed strips have no regular grid, so they answer within a cell or two -
+ * good enough to click, and the printed number underneath settles it.
+ */
+export function hitTestPage(layout, pageIndex, px, py) {
+  const page = layout.page(pageIndex);
+  for (const block of page.blocks) {
     if (px < block.x - 1 || px > block.x + block.w + 1) continue;
     for (let n = 1; n <= block.count; n++) {
       const r = cellRect(block, n);
@@ -184,197 +124,19 @@ export function hitTest(panel, px, py) {
       }
     }
   }
+  for (const panel of allPanels(layout)) {
+    if (panel.pageIndex !== pageIndex) continue;
+    for (const run of panel.runs) {
+      for (const n of runNumbers(run)) {
+        const r = wallCellRect(panel, run, n);
+        if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
+          return { block: run.block, hall: run.hall, number: n, wall: true };
+        }
+      }
+    }
+  }
   return null;
 }
 
-/**
- * Draw one hall panel.
- *
- * @param pen        drawing backend (see CanvasPen / PdfPen)
- * @param panel      from hallPanel()
- * @param marks      Map from "<block>-<number>" to {index, color}
- * @param options    {showNumbers, title}
- */
-export function drawPanel(pen, panel, marks = new Map(), options = {}) {
-  const { box } = panel;
-  const showNumbers = options.showNumbers !== false;
-
-  pen.rect(box.x, box.y, box.w, box.h, { fill: THEME.paper });
-
-  drawWalls(pen, box, panel.wallLines);
-
-  for (const block of panel.blocks) {
-    for (const run of sections(block)) {
-      const top = run[run.length - 1][1];
-      const bottom = run[0][0];
-      pen.rect(block.x, bottom, block.w, top - bottom,
-               { stroke: THEME.islandEdge, lineWidth: 0.6 });
-    }
-
-    for (let n = 1; n <= block.count; n++) {
-      const r = cellRect(block, n);
-      const mark = marks.get(`${block.block}-${n}`);
-      if (mark) {
-        pen.rect(r.x, r.y, r.w, r.h, { fill: colorOf(mark.color).rgb });
-      }
-      pen.rect(r.x, r.y, r.w, r.h, { stroke: THEME.cellEdge, lineWidth: 0.3 });
-      if (showNumbers) {
-        pen.text(String(n), r.x + r.w / 2, r.y + r.h / 2, {
-          size: Math.min(r.h * 0.66, r.w * 0.52),
-          align: 'center', middle: true,
-          color: mark ? THEME.paper : THEME.number,
-          weight: mark ? 700 : 400,
-        });
-      }
-    }
-
-    // block letter in the widest aisle inside the strip
-    let gap = 0, gy = null;
-    for (let i = 1; i < block.rows.length; i++) {
-      const d = block.rows[i][0] - block.rows[i - 1][1];
-      if (d > gap) {
-        gap = d;
-        gy = (block.rows[i][0] + block.rows[i - 1][1]) / 2;
-      }
-    }
-    if (gy !== null && gap > 4) {
-      pen.text(block.block, block.x + block.w / 2, gy, {
-        size: Math.min(gap * 0.78, block.w * 0.85),
-        align: 'center', middle: true, color: THEME.letter, weight: 700,
-      });
-    }
-  }
-
-  for (const run of panel.runs || []) {
-    for (const n of runNumbers(run)) {
-      const r = wallCellRect(panel, run, n);
-      const mark = marks.get(`${run.block}-${n}`);
-      pen.rect(r.x, r.y, r.w, r.h, {
-        ...(mark ? { fill: colorOf(mark.color).rgb } : null),
-        stroke: THEME.islandEdge, lineWidth: 0.4,
-      });
-      if (showNumbers) {
-        pen.text(String(n), r.x + r.w / 2, r.y + r.h / 2, {
-          size: Math.min(r.h * 0.6, r.w * 0.6, 6),
-          align: 'center', middle: true,
-          color: mark ? THEME.paper : THEME.number, weight: mark ? 700 : 400,
-        });
-      }
-    }
-    const mid = runNumbers(run)[Math.floor(runNumbers(run).length / 2)];
-    const r = wallCellRect(panel, run, mid);
-    const vertical = run.side === 'left' || run.side === 'right';
-    pen.text(run.block, vertical ? r.x + r.w + 5 : r.x + r.w / 2,
-             vertical ? r.y + r.h / 2 : r.y + (run.side === 'top' ? -6 : r.h + 3), {
-      size: 8, align: 'center', middle: vertical, color: THEME.letter, weight: 700,
-    });
-  }
-
-  // marker badges last so they sit above the grid
-  for (const block of panel.blocks) {
-    for (let n = 1; n <= block.count; n++) {
-      const mark = marks.get(`${block.block}-${n}`);
-      if (!mark) continue;
-      const r = cellRect(block, n);
-      const rightHalf = r.x > block.x + block.w / 4;
-      const bx = (rightHalf ? r.x + r.w : r.x) + (rightHalf ? 1 : -1) * 4.4;
-      const by = r.y + r.h / 2;
-      pen.circle(bx, by, 4.2, { fill: colorOf(mark.color).rgb, stroke: THEME.paper,
-                                lineWidth: 0.7 });
-      pen.text(String(mark.index), bx, by, {
-        size: String(mark.index).length > 2 ? 4.2 : 5.2,
-        align: 'center', middle: true, color: THEME.paper, weight: 700,
-      });
-    }
-  }
-
-  for (const run of panel.runs || []) {
-    for (const n of runNumbers(run)) {
-      const mark = marks.get(`${run.block}-${n}`);
-      if (!mark) continue;
-      const r = wallCellRect(panel, run, n);
-      const vertical = run.side === 'left' || run.side === 'right';
-      const bx = vertical ? (run.side === 'left' ? r.x + r.w + 4.6 : r.x - 4.6)
-                          : r.x + r.w / 2;
-      const by = vertical ? r.y + r.h / 2
-                          : (run.side === 'top' ? r.y - 4.6 : r.y + r.h + 4.6);
-      pen.circle(bx, by, 4.2, { fill: colorOf(mark.color).rgb, stroke: THEME.paper,
-                                lineWidth: 0.7 });
-      pen.text(String(mark.index), bx, by, {
-        size: String(mark.index).length > 2 ? 4.2 : 5.2,
-        align: 'center', middle: true, color: THEME.paper, weight: 700,
-      });
-    }
-  }
-
-  if (options.title !== false) {
-    pen.text(options.title || panel.hall, box.x + 4, box.y + box.h + 12,
-             { size: 15, color: THEME.hall, weight: 700 });
-    const spaces = panel.blocks.reduce((n, b) => n + b.count, 0);
-    pen.text(`${panel.blocks.length} blocks / ${spaces} spaces  `
-             + panel.blocks.map(b => b.block).join(''),
-             box.x + 4, box.y + box.h + 3, { size: 7, color: THEME.dim });
-  }
-
-  drawNotes(pen, box, options.notes);
-}
-
-/**
- * Entries this map cannot place: wall blocks, whose spaces wrap around the hall
- * walls with no regular grid to extract, and codes we could not read.  They are
- * listed on the sheet rather than pinned at a guessed position.
- */
-const WALL_W = 2.2;      // drawn thickness of a hall wall
-
-/**
- * The hall outline, drawn as the wall segments the printed map actually has.
- * The faint rectangle underneath closes the shape; wherever no segment covers
- * it, that is a doorway.
- */
-function drawWalls(pen, box, lines) {
-  pen.rect(box.x, box.y, box.w, box.h,
-           { stroke: THEME.opening, lineWidth: 0.8 });
-  for (const line of lines || []) {
-    const a = Math.min(line.from, line.to);
-    const b = Math.max(line.from, line.to);
-    if (line.side === 'left' || line.side === 'right') {
-      const x = line.side === 'left' ? box.x : box.x + box.w - WALL_W;
-      pen.rect(x, a, WALL_W, b - a, { fill: THEME.wall });
-    } else {
-      const y = line.side === 'top' ? box.y + box.h - WALL_W : box.y;
-      pen.rect(a, y, b - a, WALL_W, { fill: THEME.wall });
-    }
-  }
-}
-
-const NOTE_LIMIT = 3;
-
-function drawNotes(pen, box, notes) {
-  if (!notes || !notes.length) return;
-  const size = 6.5;
-  const lead = size * 1.5;
-  const right = box.x + box.w - 4;
-  // sits in the header strip, right-aligned, so it clears the hall title on the
-  // left and the grid below
-  let y = box.y + box.h + HEADER - lead * 1.4;
-
-  pen.text('壁 (off-grid)', right, y, {
-    size, align: 'right', color: THEME.dim, weight: 700,
-  });
-  for (const note of notes.slice(0, NOTE_LIMIT)) {
-    y -= lead;
-    pen.circle(right - 3, y + size * 0.32, 3, { fill: colorOf(note.color).rgb });
-    pen.text(String(note.index), right - 3, y + size * 0.32,
-             { size: 3.8, align: 'center', middle: true, color: THEME.paper,
-               weight: 700 });
-    pen.text(note.code, right - 9, y, { size, align: 'right', color: THEME.number });
-  }
-  if (notes.length > NOTE_LIMIT) {
-    y -= lead;
-    pen.text(`+${notes.length - NOTE_LIMIT} more (see checklist)`, right, y,
-             { size, align: 'right', color: THEME.dim });
-  }
-}
-
-/** Key used by the marks map. */
+/** Key used when looking a marker up by block and number. */
 export const markKey = (block, number) => `${block}-${number}`;

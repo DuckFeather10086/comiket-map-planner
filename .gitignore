@@ -1,9 +1,4 @@
-# The official hall map is Comiket's artwork.  It is kept out of the repo by
-# default so the site does not redistribute it; the app asks for it once and
-# caches it in the browser.  Delete this line if you would rather ship it with
-# your deployment (see README).
-maps/*.pdf
-
+# the official hall map now ships with the site, see README
 node_modules/
 .DS_Store
 *.log
