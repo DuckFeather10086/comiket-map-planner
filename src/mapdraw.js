@@ -23,7 +23,7 @@ export const THEME = {
   dim: [0.55, 0.60, 0.66],
 };
 
-const PAD = 18;          // points of breathing room around a hall
+const PAD = 30;          // points of breathing room, enough to show the walls
 const HEADER = 34;       // strip above the map for the hall name and notes
 
 /**
@@ -43,11 +43,20 @@ export function hallPanel(layout, pageIndex, hall) {
       y1 = Math.max(y1, ry1);
     }
   }
-  return {
-    hall, pageIndex, blocks,
-    box: { x: x0 - PAD, y: y0 - PAD, w: x1 - x0 + PAD * 2, h: y1 - y0 + PAD * 2 },
-    header: HEADER,
-  };
+  const box = { x: x0 - PAD, y: y0 - PAD,
+                w: x1 - x0 + PAD * 2, h: y1 - y0 + PAD * 2 };
+  // the building is stored per page; keep the parts this hall's sheet shows,
+  // clipped to the sheet so a neighbouring hall's walls do not bleed in
+  const structures = [];
+  for (const s of layout.page(pageIndex).structures || []) {
+    const cx0 = Math.max(s.x, box.x), cy0 = Math.max(s.y, box.y);
+    const cx1 = Math.min(s.x + s.w, box.x + box.w);
+    const cy1 = Math.min(s.y + s.h, box.y + box.h);
+    if (cx1 - cx0 > 0.4 && cy1 - cy0 > 0.4) {
+      structures.push({ x: cx0, y: cy0, w: cx1 - cx0, h: cy1 - cy0, tone: s.tone });
+    }
+  }
+  return { hall, pageIndex, blocks, structures, box, header: HEADER };
 }
 
 /** Every hall on the event, in map order. */
@@ -125,6 +134,12 @@ export function drawPanel(pen, panel, marks = new Map(), options = {}) {
   const showNumbers = options.showNumbers !== false;
 
   pen.rect(box.x, box.y, box.w, box.h, { fill: THEME.paper });
+
+  // the building first, so the tables sit on top of it
+  for (const s of panel.structures) {
+    const g = 1 - Math.min(0.86, s.tone * 0.92);
+    pen.rect(s.x, s.y, s.w, s.h, { fill: [g, g * 1.02, g * 1.05] });
+  }
 
   for (const block of panel.blocks) {
     for (const run of sections(block)) {

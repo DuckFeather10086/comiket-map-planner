@@ -65,6 +65,15 @@ def check(path: str) -> list[str]:
                 problems.append(f'{tag}: wall {wall["block"]} clashes with a block')
             seen[wall['block']] = f'{tag} wall'
 
+        for i, shape in enumerate(page.get('structures', [])):
+            if shape['w'] <= 0 or shape['h'] <= 0:
+                problems.append(f'{tag}: structure {i} has no area')
+            if not 0 <= shape['tone'] <= 1:
+                problems.append(f'{tag}: structure {i} tone {shape["tone"]} out of range')
+            if not (-1 <= shape['x'] and shape['x'] + shape['w'] <= page['width'] + 1
+                    and -1 <= shape['y'] and shape['y'] + shape['h'] <= page['height'] + 1):
+                problems.append(f'{tag}: structure {i} outside the page')
+
     return problems
 
 

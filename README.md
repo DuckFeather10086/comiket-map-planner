@@ -56,6 +56,8 @@ python3 -m http.server 8000   # 然后打开 http://localhost:8000
 tools/fetch_map.sh C109 C109Map_all_B4.pdf
 # 按新地图改 tools/extract_layout.py 里的 PAGES（馆的区块字母顺序、band 的 y 范围）
 python3 tools/extract_layout.py maps/C109Map_all_B4.pdf data/C109.json
+# 墙体：改 extract_structure.py 里的 HALL_BAND（每页会场所在的纵向范围）
+python3 tools/extract_structure.py maps/C109Map_all_B4.pdf data/C109.json
 python3 tools/check_layout.py data/C109.json
 # 目视核对：蓝色的推算编号应当与印刷的手写编号一一对应
 python3 tools/debug_overlay.py data/C109.json maps/C109Map_all_B4.pdf 1 /tmp/ov1.png
@@ -68,9 +70,10 @@ python3 tools/debug_overlay.py data/C109.json maps/C109Map_all_B4.pdf 1 /tmp/ov1
 
 - **壁区块（ア / A / あ / め / a）没有坐标**。它们沿墙绕角排布，没有规则网格可抽。
   工具会认出代码，把它列在图的右上角和清单里，但不会在图上瞎猜位置。
-- 这是**示意图**，不是官方图的复制品：只画桌位网格、区块字母和馆名，
-  没有墙体、入口、洗手间、サークル窓口等设施。找到区块之后靠现场指示牌。
-  需要严格对照官方版式时请另外带官方图。
+- **设施没有名字**：墙体、柱子、服务台的形状都画了（形态学开运算从官方图量出，
+  见 `tools/extract_structure.py`），但洗手间 / サークル窓口 / 地区本部 这些
+  文字标签没有 —— 它们在官方图里也是转成曲线的，读不出来。形状能帮你定位，
+  具体是什么要看现场指示牌。
 - 日期文案（`DAY_LABEL`）是 C108 的 2026-08-15/16，换届需要改。
 - 一格 = 一张桌子；`a` / `b` 两个 space 共用一格，标记覆盖整格，具体 a/b 写在清单里。
 
@@ -78,14 +81,15 @@ python3 tools/debug_overlay.py data/C109.json maps/C109Map_all_B4.pdf 1 /tmp/ov1
 
 ```
 index.html              界面
-src/mapdraw.js          画地图（岛、格子、编号、区块字母）+ 点击命中
+src/mapdraw.js          画地图（墙体、岛、格子、编号、区块字母）+ 点击命中
 src/pens.js             两个绘制后端：canvas 与 pdf-lib
 src/layout.js           配置代码解析 + 坐标解析
 src/viewer.js           屏幕地图、缩放、点选
 src/exporter.js         导出（每馆一张 A4 + 清单页）
 src/store.js            清单状态 / localStorage / 粘贴导入
-data/C108.json          抽取出的坐标（52 KB）
-tools/extract_layout.py 从官方 PDF 抽取坐标
+data/C108.json          抽取出的坐标 + 墙体形状（103 KB）
+tools/extract_layout.py 从官方 PDF 抽取桌位坐标
+tools/extract_structure.py 抽取墙体 / 柱子 / 服务台的形状
 tools/check_layout.py   数据自检（CI 会跑）
 tools/debug_overlay.py  把推算编号叠加到官方图上，用于目视核对
 vendor/pdf-lib.min.js   导出用（懒加载）
