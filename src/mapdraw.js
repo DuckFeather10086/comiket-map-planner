@@ -14,7 +14,7 @@ import { colorOf } from './layout.js';
 export const THEME = {
   paper: [1, 1, 1],
   frame: [0.78, 0.81, 0.85],
-  island: [0.96, 0.97, 0.98],
+  wall: [0.35, 0.39, 0.45],
   islandEdge: [0.62, 0.66, 0.72],
   cellEdge: [0.80, 0.83, 0.87],
   number: [0.25, 0.30, 0.36],
@@ -45,20 +45,9 @@ export function hallPanel(layout, pageIndex, hall) {
   }
   const box = { x: x0 - PAD, y: y0 - PAD,
                 w: x1 - x0 + PAD * 2, h: y1 - y0 + PAD * 2 };
-  // the building is stored per page; keep the parts this hall's sheet shows,
-  // clipped to the sheet so a neighbouring hall's walls do not bleed in
-  const structures = [];
-  for (const s of layout.page(pageIndex).structures || []) {
-    const cx0 = Math.max(s.x, box.x), cy0 = Math.max(s.y, box.y);
-    const cx1 = Math.min(s.x + s.w, box.x + box.w);
-    const cy1 = Math.min(s.y + s.h, box.y + box.h);
-    if (cx1 - cx0 > 0.4 && cy1 - cy0 > 0.4) {
-      structures.push({ x: cx0, y: cy0, w: cx1 - cx0, h: cy1 - cy0, tone: s.tone });
-    }
-  }
   const runs = (layout.doc.wallRuns || [])
     .filter(r => r.page === pageIndex && r.hall === hall);
-  return { hall, pageIndex, blocks, structures, box, runs, header: HEADER };
+  return { hall, pageIndex, blocks, box, runs, header: HEADER };
 }
 
 /** Every hall on the event, in map order. */
@@ -116,10 +105,13 @@ export function wallCellRect(panel, run, number) {
   if (i < 0) return null;
   const { box } = panel;
   const vertical = run.side === 'left' || run.side === 'right';
-  const span = (vertical ? box.h : box.w) - WALL_GAP * 2;
+  // horizontal runs stop short of the corners so they do not collide with a
+  // vertical run on the same hall
+  const inset = WALL_GAP + (vertical ? 0 : WALL_T);
+  const span = (vertical ? box.h : box.w) - inset * 2;
   const step = span / nums.length;
   const k = run.reverse ? nums.length - 1 - i : i;
-  const along = (vertical ? box.y : box.x) + WALL_GAP + k * step;
+  const along = (vertical ? box.y : box.x) + inset + k * step;
 
   if (vertical) {
     const x = run.side === 'left' ? box.x + WALL_GAP : box.x + box.w - WALL_GAP - WALL_T;
@@ -183,18 +175,15 @@ export function drawPanel(pen, panel, marks = new Map(), options = {}) {
 
   pen.rect(box.x, box.y, box.w, box.h, { fill: THEME.paper });
 
-  // the building first, so the tables sit on top of it
-  for (const s of panel.structures) {
-    const g = 1 - Math.min(0.86, s.tone * 0.92);
-    pen.rect(s.x, s.y, s.w, s.h, { fill: [g, g * 1.02, g * 1.05] });
-  }
+  // the hall itself is just its outline: a line drawing, no filled shapes
+  pen.rect(box.x, box.y, box.w, box.h, { stroke: THEME.wall, lineWidth: 1.4 });
 
   for (const block of panel.blocks) {
     for (const run of sections(block)) {
       const top = run[run.length - 1][1];
       const bottom = run[0][0];
       pen.rect(block.x, bottom, block.w, top - bottom,
-               { fill: THEME.island, stroke: THEME.islandEdge, lineWidth: 0.6 });
+               { stroke: THEME.islandEdge, lineWidth: 0.6 });
     }
 
     for (let n = 1; n <= block.count; n++) {
@@ -236,7 +225,7 @@ export function drawPanel(pen, panel, marks = new Map(), options = {}) {
       const r = wallCellRect(panel, run, n);
       const mark = marks.get(`${run.block}-${n}`);
       pen.rect(r.x, r.y, r.w, r.h, {
-        fill: mark ? colorOf(mark.color).rgb : THEME.island,
+        ...(mark ? { fill: colorOf(mark.color).rgb } : null),
         stroke: THEME.islandEdge, lineWidth: 0.4,
       });
       if (showNumbers) {

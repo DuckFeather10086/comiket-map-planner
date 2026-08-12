@@ -24,7 +24,7 @@ const css = ([r, g, b]) =>
 const NON_LATIN = /[^\u0000-\u00ff]/;
 
 /** Break a string into consecutive runs of the same script. */
-function splitRuns(str) {
+export function splitRuns(str) {
   const runs = [];
   for (const ch of str) {
     const cjk = NON_LATIN.test(ch);

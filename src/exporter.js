@@ -5,13 +5,13 @@
  * what you print is what you saw.  Sheets are all vector: the space grid and
  * markers as shapes, kana block letters and hall names through a 9 kB font
  * subset holding only those glyphs, everything ASCII through the built-in
- * Helvetica.  The one raster part is the checklist, painted on a canvas because
- * circle names are arbitrary Japanese and a font covering them would be megabytes.
+ * Helvetica.  The checklist needs arbitrary Japanese for circle names, so it
+ * pulls in a JIS X 0208 level-1 face, but only when a checklist is printed.
  */
 
 import { colorOf } from './layout.js';
 import { allPanels, drawPanel, markKey } from './mapdraw.js';
-import { PdfPen, fit } from './pens.js';
+import { PdfPen, fit, splitRuns } from './pens.js';
 
 const A4 = { w: 595.28, h: 841.89 };
 const MARGIN = 22;
@@ -29,6 +29,24 @@ function loadLibs() {
     return { lib: window.PDFLib, fontkit: window.fontkit, cjkFont: font };
   })();
   return libPromise;
+}
+
+let jisPromise;
+
+/**
+ * The checklist sets arbitrary circle names, so it needs real Japanese
+ * coverage: JIS X 0208 level 1, which is what ordinary Japanese text uses.
+ * Fetched only when a checklist is actually being printed.
+ *
+ * It goes in whole rather than subset because pdf-lib's TrueType subsetter
+ * silently drops glyphs from CJK fonts past about 30 kB - the text layer comes
+ * out right and the page renders blank - so the font is embedded as-is and
+ * costs roughly 300 kB in the output.
+ */
+function loadJisFont() {
+  jisPromise ??= fetch(new URL('../vendor/jis-level1.ttf', import.meta.url))
+    .then(r => r.arrayBuffer());
+  return jisPromise;
 }
 
 function inject(src) {
@@ -142,9 +160,10 @@ export async function buildPdf({ layout, store, days, options }) {
         drawSheet({ doc, rgb, fonts, sheet, day: plan.day, layout });
       }
       if (options.checklist) {
+        fonts.jp ??= await doc.embedFont(await loadJisFont(), { subset: false });
         const placed = new Set(markers.map(m => m.entry.id));
         await addChecklist(doc, plan.day, markers,
-                           plan.entries.filter(e => !placed.has(e.id)), orphans);
+                           plan.entries.filter(e => !placed.has(e.id)), fonts, rgb);
       }
     }
 
@@ -188,9 +207,10 @@ function drawSheet({ doc, rgb, fonts, sheet, day }) {
 
 /* ---------------------------------------------------------------- checklist */
 
-const CHECK = { dpi: 2.6, margin: 34, rowH: 22, headH: 34, groupH: 22 };
+const CHECK = { margin: 34, rowH: 22, headH: 36, groupH: 20 };
 
-async function addChecklist(doc, day, markers, unplaced, orphans) {
+/** The walking list, set as real text so it can be searched and selected. */
+async function addChecklist(doc, day, markers, unplaced, fonts, rgb) {
   const groups = [];
   for (const m of markers) {
     const hall = m.placed ? m.hall : `${m.hall}（地図に印なし）`;
@@ -208,13 +228,9 @@ async function addChecklist(doc, day, markers, unplaced, orphans) {
   }
   if (!groups.length) return;
 
-  const pages = paginate(groups);
-  for (const [i, rows] of pages.entries()) {
-    const canvas = paintChecklist(rows, day, i + 1, pages.length);
-    const png = await doc.embedPng(canvas.toDataURL('image/png'));
-    doc.addPage([A4.w, A4.h])
-      .drawImage(png, { x: 0, y: 0, width: A4.w, height: A4.h });
-  }
+  const sheets = paginate(groups);
+  sheets.forEach((rows, i) =>
+    paintChecklist(doc, rows, day, i + 1, sheets.length, fonts, rgb));
 }
 
 function paginate(groups) {
@@ -241,98 +257,98 @@ function paginate(groups) {
   return pages;
 }
 
-function paintChecklist(groups, day, pageNo, pageTotal) {
-  const k = CHECK.dpi;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(A4.w * k);
-  canvas.height = Math.round(A4.h * k);
-  const ctx = canvas.getContext('2d');
-  const font = (size, weight = 400) =>
-    `${weight} ${size * k}px system-ui, "Hiragino Sans", "Noto Sans JP", "Noto Sans SC", sans-serif`;
-
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  const left = CHECK.margin * k;
-  const right = (A4.w - CHECK.margin) * k;
-  let y = CHECK.margin * k;
-
-  ctx.fillStyle = '#111';
-  ctx.font = font(15, 700);
-  ctx.fillText(`${DAY_LABEL[day].jp}  ${DAY_LABEL[day].date}  巡回清单`, left, y + 13 * k);
-  ctx.font = font(9);
-  ctx.fillStyle = '#777';
-  ctx.textAlign = 'right';
-  ctx.fillText(`${pageNo} / ${pageTotal}`, right, y + 13 * k);
-  ctx.textAlign = 'left';
-  y += CHECK.headH * k;
-
-  const colCode = left + 26 * k;
-  const colName = left + 96 * k;
-  const colCheck = right - 16 * k;
-
-  for (const group of groups) {
-    ctx.fillStyle = '#f0f2f5';
-    ctx.fillRect(left, y, right - left, (CHECK.groupH - 5) * k);
-    ctx.fillStyle = '#333';
-    ctx.font = font(10, 700);
-    ctx.fillText(group.hall, left + 6 * k, y + 12 * k);
-    y += CHECK.groupH * k;
-
-    for (const row of group.rows) {
-      const [r, g, b] = colorOf(row.color).rgb;
-      const css = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
-
-      ctx.beginPath();
-      ctx.arc(left + 8 * k, y + 6 * k, 7 * k, 0, Math.PI * 2);
-      if (row.index === null) {
-        ctx.strokeStyle = css;
-        ctx.lineWidth = 1.4 * k;
-        ctx.stroke();
-      } else {
-        ctx.fillStyle = css;
-        ctx.fill();
-        ctx.fillStyle = '#fff';
-        ctx.font = font(7.5, 700);
-        ctx.textAlign = 'center';
-        ctx.fillText(String(row.index), left + 8 * k, y + 8.7 * k);
-        ctx.textAlign = 'left';
-      }
-
-      ctx.fillStyle = '#111';
-      ctx.font = font(10, 600);
-      ctx.fillText(row.code, colCode, y + 9.5 * k);
-
-      const width = colCheck - colName - 22 * k;
-      ctx.font = font(9.5);
-      ctx.fillStyle = '#222';
-      ctx.fillText(clip(ctx, row.entry.name || '—', width), colName, y + 8.5 * k);
-      if (row.entry.note) {
-        ctx.font = font(8);
-        ctx.fillStyle = '#888';
-        ctx.fillText(clip(ctx, row.entry.note, width), colName, y + 18 * k);
-      }
-
-      ctx.strokeStyle = '#999';
-      ctx.lineWidth = 1 * k;
-      ctx.strokeRect(colCheck - 5 * k, y + 2 * k, 10 * k, 10 * k);
-
-      y += CHECK.rowH * k;
-      ctx.strokeStyle = '#eceff2';
-      ctx.beginPath();
-      ctx.moveTo(left, y - 2 * k);
-      ctx.lineTo(right, y - 2 * k);
-      ctx.stroke();
-    }
-  }
-  return canvas;
+/**
+ * The Japanese face is a CJK fallback and carries no Latin, so every string is
+ * split by script and each run drawn with the font that actually has it.
+ */
+function pickFont(run, fonts, bold) {
+  return run.cjk ? fonts.jp : (bold ? fonts.bold : fonts.latin);
 }
 
-function clip(ctx, text, maxWidth) {
-  if (ctx.measureText(text).width <= maxWidth) return text;
+function measure(text, size, fonts, bold = false) {
+  return splitRuns(text).reduce(
+    (w, run) => w + pickFont(run, fonts, bold).widthOfTextAtSize(run.text, size), 0);
+}
+
+function write(page, text, x, y, { size, fonts, bold = false, color, align }) {
+  let px = x;
+  if (align === 'right') px -= measure(text, size, fonts, bold);
+  for (const run of splitRuns(text)) {
+    const font = pickFont(run, fonts, bold);
+    page.drawText(run.text, { x: px, y, size, font, color });
+    px += font.widthOfTextAtSize(run.text, size);
+  }
+}
+
+function clip(text, size, fonts, maxWidth) {
+  if (measure(text, size, fonts) <= maxWidth) return text;
   let out = text;
-  while (out.length > 1 && ctx.measureText(out + '…').width > maxWidth) {
+  while (out.length > 1 && measure(out + '…', size, fonts) > maxWidth) {
     out = out.slice(0, -1);
   }
   return out + '…';
+}
+
+function paintChecklist(doc, groups, day, pageNo, pageTotal, fonts, rgb) {
+  const page = doc.addPage([A4.w, A4.h]);
+  const left = CHECK.margin;
+  const right = A4.w - CHECK.margin;
+  let y = A4.h - CHECK.margin;
+
+  write(page, `${DAY_LABEL[day].jp}  ${DAY_LABEL[day].date}  巡回リスト`,
+        left, y - 13, { size: 14, fonts, bold: true, color: rgb(0.07, 0.09, 0.12) });
+  write(page, `${pageNo} / ${pageTotal}`, right, y - 12,
+        { size: 9, fonts, align: 'right', color: rgb(0.5, 0.54, 0.58) });
+  y -= CHECK.headH;
+
+  const colCode = left + 26;
+  const colName = left + 96;
+  const colCheck = right - 16;
+
+  for (const group of groups) {
+    page.drawRectangle({ x: left, y: y - CHECK.groupH + 6, width: right - left,
+                         height: CHECK.groupH - 6, color: rgb(0.94, 0.95, 0.96) });
+    write(page, group.hall, left + 6, y - CHECK.groupH + 11,
+          { size: 9, fonts, bold: true, color: rgb(0.2, 0.23, 0.27) });
+    y -= CHECK.groupH;
+
+    for (const row of group.rows) {
+      const [r, g, b] = colorOf(row.color).rgb;
+      const colour = rgb(r, g, b);
+      const mid = y - 11;
+
+      if (row.index === null) {
+        page.drawCircle({ x: left + 8, y: mid, size: 6.5,
+                          borderColor: colour, borderWidth: 1.2 });
+      } else {
+        page.drawCircle({ x: left + 8, y: mid, size: 6.5, color: colour });
+        const label = String(row.index);
+        page.drawText(label, {
+          x: left + 8 - fonts.bold.widthOfTextAtSize(label, 7) / 2, y: mid - 2.5,
+          size: 7, font: fonts.bold, color: rgb(1, 1, 1),
+        });
+      }
+
+      write(page, row.code, colCode, mid - 3,
+            { size: 9.5, fonts, bold: true, color: rgb(0.07, 0.09, 0.12) });
+
+      const width = colCheck - colName - 22;
+      if (row.entry.name) {
+        write(page, clip(row.entry.name, 9, fonts, width),
+              colName, mid + (row.entry.note ? 1 : -3),
+              { size: 9, fonts, color: rgb(0.13, 0.15, 0.18) });
+      }
+      if (row.entry.note) {
+        write(page, clip(row.entry.note, 7.5, fonts, width), colName, mid - 7,
+              { size: 7.5, fonts, color: rgb(0.53, 0.56, 0.6) });
+      }
+
+      page.drawRectangle({ x: colCheck - 5, y: mid - 5, width: 10, height: 10,
+                           borderColor: rgb(0.6, 0.63, 0.67), borderWidth: 0.8 });
+
+      y -= CHECK.rowH;
+      page.drawLine({ start: { x: left, y: y + 2 }, end: { x: right, y: y + 2 },
+                      thickness: 0.4, color: rgb(0.91, 0.93, 0.95) });
+    }
+  }
 }
